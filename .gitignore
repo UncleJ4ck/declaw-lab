@@ -1,0 +1,16 @@
+# runtime state, never commit
+data/
+bin/
+capture/*.log
+mitm/cert.pem
+mitm/key.pem
+
+# patched apps are the user's, not part of the tool
+apks/*.apk
+apks/*/
+!apks/.gitkeep
+!capture/.gitkeep
+
+# python bytecode
+__pycache__/
+*.pyc

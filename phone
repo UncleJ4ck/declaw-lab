@@ -1,0 +1,277 @@
+#!/usr/bin/env bash
+#
+# declaw-env control script. One phone, a few verbs.
+#
+#   ./phone go APK         one shot: boot + install + wire Burp + open the phone
+#   ./phone up [VER]       boot the phone (VER=11 default, or 12/13; or ANDROID=13 ./phone up)
+#   ./phone apk [PATH]     install patched APK(s); default: everything under ./apks
+#   ./phone ui             open the interactive phone window (scrcpy)
+#   ./phone capture PKG    redirect one app's HTTPS into Burp (127.0.0.1:8080), decrypt
+#   ./phone uncapture PKG  remove the redirect and stop the MITM
+#   ./phone logs           follow decrypted requests
+#   ./phone shell          adb shell into the phone
+#   ./phone down           stop the phone (keeps ./data)
+#   ./phone wipe           stop and delete ./data (factory reset)
+#
+# Capture goes into Burp by default (its stock 127.0.0.1:8080 listener, no cert install
+# on the phone). Burp not running? It falls back to direct + a decrypted log. Point it
+# elsewhere with  BURP=host:port ./phone capture <pkg>  or force direct with  BURP=.
+#
+# The phone is reachable over adb at localhost:5556. It is disposable: nothing here
+# touches your real device. Android 11 is the default: redroid ships arm translation
+# for it (needed for the arm64 Flutter libs) and it is the most stable redroid build.
+set -euo pipefail
+cd "$(dirname "$0")"
+
+SERIAL="localhost:5556"
+MITM_PORT="8083"        # DNAT target; Burp keeps its default 8080
+SCRCPY_VER="v4.0"
+SCRCPY_DIR="bin/scrcpy-linux-x86_64-${SCRCPY_VER}"
+SCRCPY_URL="https://github.com/Genymobile/scrcpy/releases/download/${SCRCPY_VER}/scrcpy-linux-x86_64-${SCRCPY_VER}.tar.gz"
+
+adb() { command adb -s "$SERIAL" "$@"; }
+say() { printf '\n>> %s\n' "$*"; }
+
+# type -P finds the PATH binary only, so it is not fooled by the adb() function above.
+need() { type -P "$1" >/dev/null 2>&1 || { echo "declaw-env needs '$1'. Install it (${2:-your package manager})." >&2; exit 1; }; }
+need_core() { need docker "docker"; need adb "android-tools / platform-tools"; }
+
+# docker compose v2 plugin, or the v1 docker-compose standalone, whichever exists
+COMPOSE=""
+compose() {
+  if [ -z "$COMPOSE" ]; then
+    if docker compose version >/dev/null 2>&1; then COMPOSE="docker compose"
+    elif type -P docker-compose >/dev/null 2>&1; then COMPOSE="docker-compose"
+    else echo "Need 'docker compose' (v2 plugin) or 'docker-compose' (v1)." >&2; exit 1; fi
+  fi
+  # shellcheck disable=SC2086
+  $COMPOSE "$@"
+}
+
+# map an Android version to a redroid image tag. 11/12 ship arm translation (libndk)
+# built in; 13 needs the -libndk variant; others may not translate the arm64 Flutter lib.
+redroid_tag() {
+  case "$1" in
+    11) echo "11.0.0-latest" ;;
+    12) echo "12.0.0-latest" ;;
+    13) echo "13.0.0-libndk" ;;
+    *)  echo "WARNING: Android $1 may lack arm translation; the arm64 Flutter lib may not run." >&2
+        echo "$1.0.0-latest" ;;
+  esac
+}
+
+# redroid runs on the host kernel and needs binder. Warn early rather than time out.
+check_binder() {
+  grep -qw binder /proc/filesystems 2>/dev/null && return 0
+  [ -e /dev/binder ] && return 0
+  echo "WARNING: no binder support on this host kernel (no binderfs, no /dev/binder)." >&2
+  echo "         redroid needs CONFIG_ANDROID_BINDER_IPC; the phone will likely not boot." >&2
+  echo "         Debian/Ubuntu: a kernel with binder (linux-modules-extra) or:" >&2
+  echo "         sudo modprobe binder_linux devices=binder,hwbinder,vndbinder" >&2
+}
+
+wait_boot() {
+  command adb connect "$SERIAL" >/dev/null 2>&1 || true
+  say "Waiting for Android to finish booting..."
+  for _ in $(seq 1 60); do
+    if [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ]; then
+      say "Booted: $(adb shell getprop ro.product.model | tr -d '\r') (Android $(adb shell getprop ro.build.version.release | tr -d '\r'), ABIs $(adb shell getprop ro.product.cpu.abilist | tr -d '\r'))"
+      return 0
+    fi
+    sleep 2
+  done
+  echo "Phone did not report boot_completed in time. Try: ./phone shell" >&2
+  return 1
+}
+
+cmd_up() {
+  local ver="${1:-${ANDROID:-11}}"
+  REDROID_VER="$(redroid_tag "$ver")"; export REDROID_VER
+  need_core
+  check_binder
+  say "Deploying Android $ver (redroid:$REDROID_VER)"
+  compose up -d
+  wait_boot
+  echo
+  echo "Next: drop a patched APK in ./apks, then  ./phone apk  &&  ./phone ui"
+}
+
+cmd_apk() {
+  local target="${1:-}"
+  command adb connect "$SERIAL" >/dev/null 2>&1 || true
+  if [ -n "$target" ]; then
+    install_one "$target"; return
+  fi
+  shopt -s nullglob
+  local found=0
+  for d in apks/*/; do
+    [ -e "$d" ] || continue
+    if ls "$d"*.apk >/dev/null 2>&1; then found=1; install_one "$d"; fi
+  done
+  for f in apks/*.apk; do found=1; install_one "$f"; done
+  [ "$found" = 1 ] || { echo "No APKs in ./apks (single .apk or a split dir of *.apk). Nothing to do."; return 1; }
+}
+
+install_one() {
+  local path="$1"
+  if [ -d "$path" ]; then
+    say "Installing split set: $path"
+    # patched splits carry a *_patched.apk naming from declaw; fall back to all apks
+    local apks
+    apks=$(ls "$path"*_patched.apk 2>/dev/null || true)
+    [ -n "$apks" ] || apks=$(ls "$path"*.apk 2>/dev/null)
+    # shellcheck disable=SC2086
+    adb install-multiple -r -g $apks
+  else
+    say "Installing: $path"
+    adb install -r -g "$path"
+  fi
+}
+
+cmd_ui() {
+  need adb "android-tools / platform-tools"
+  local scrcpy=""
+  if type -P scrcpy >/dev/null 2>&1; then
+    scrcpy="scrcpy"                                   # distro-packaged, any arch
+  elif [ -x "$SCRCPY_DIR/scrcpy" ]; then
+    scrcpy="$SCRCPY_DIR/scrcpy"                        # already fetched
+  elif [ "$(uname -m)" = "x86_64" ]; then
+    need curl "curl"
+    say "Fetching scrcpy prebuilt (one time, x86_64)"
+    mkdir -p bin && curl -fsSL "$SCRCPY_URL" -o bin/scrcpy.tgz && tar xzf bin/scrcpy.tgz -C bin && rm -f bin/scrcpy.tgz
+    scrcpy="$SCRCPY_DIR/scrcpy"
+  else
+    echo "No scrcpy found and the bundled prebuilt is x86_64 only (host is $(uname -m))." >&2
+    echo "Install scrcpy from your package manager, then re-run: ./phone ui" >&2
+    return 1
+  fi
+  command adb connect "$SERIAL" >/dev/null 2>&1 || true
+  say "Opening interactive phone window. Close it any time; the phone keeps running."
+  # redroid has no opus audio encoder, so --no-audio; ADB points scrcpy at the host adb.
+  # nohup + redirect so ui returns immediately and does not hold the caller's stdout.
+  ADB=$(type -P adb) nohup "$scrcpy" -s "$SERIAL" --no-audio \
+    --window-title="declaw-phone" --max-size=1024 >bin/scrcpy.log 2>&1 &
+  echo "scrcpy pid $! (log: bin/scrcpy.log)"
+}
+
+guest_gw() {
+  # the docker-bridge gateway the phone reaches the host MITM through. redroid keeps
+  # its default route in Android's netd table, so read table all; fall back to <net>.1
+  local gw
+  gw=$(adb shell su 0 ip route show table all 2>/dev/null | grep 'default via' | head -1 | awk '{print $3}' | tr -d '\r' || true)
+  if [ -z "$gw" ]; then
+    gw=$(adb shell ip -4 addr show eth0 2>/dev/null | awk '/inet /{split($2,a,"/");split(a[1],o,".");print o[1]"."o[2]"."o[3]".1";exit}' | tr -d '\r' || true)
+  fi
+  echo "$gw"
+}
+
+start_mitm() {
+  local bind="${1:-0.0.0.0}"
+  if pgrep -f "mitm/mitm_fwd.py" >/dev/null 2>&1; then return; fi
+  need python3 "python3"; need openssl "openssl"
+  say "Starting host MITM on $bind:$MITM_PORT (logs -> capture/traffic.log)"
+  MITM_BIND="$bind" MITM_PORT="$MITM_PORT" nohup python3 mitm/mitm_fwd.py >/dev/null 2>&1 &
+  sleep 1
+}
+
+cmd_capture() {
+  local pkg="${1:?usage: ./phone capture <package.name>}"
+  command adb connect "$SERIAL" >/dev/null 2>&1 || true
+  local uid gw
+  uid=$(adb shell dumpsys package "$pkg" 2>/dev/null | grep 'userId=' | head -1 | sed 's/.*userId=//' | tr -d '\r' || true)
+  [ -n "$uid" ] || { echo "App $pkg is not installed. Run ./phone apk first."; return 1; }
+  gw=$(guest_gw || true)
+  [ -n "$gw" ] || { echo "Could not find the phone's gateway. Is it up? ./phone up"; return 1; }
+
+  start_mitm "$gw"
+
+  # The guest's legacy iptables needs the nat table. On an nftables host the legacy
+  # iptable_nat module is often not auto-loaded, so redirect fails until it is.
+  if ! adb shell 'su 0 iptables -t nat -L OUTPUT -n' >/dev/null 2>&1; then
+    cat <<EOF
+
+The phone's iptables has no 'nat' table yet, so traffic can't be redirected.
+Load the legacy nat module on the HOST once (needs sudo, one line):
+
+    sudo modprobe iptable_nat
+
+Then re-run:  ./phone capture $pkg
+
+(The MITM is already listening on :$MITM_PORT; nothing else to start.)
+EOF
+    return 1
+  fi
+
+  say "Redirecting $pkg (uid $uid) HTTPS -> host MITM at $gw:$MITM_PORT"
+  adb shell "su 0 sysctl -w net.ipv4.conf.all.route_localnet=1" >/dev/null 2>&1 || true
+  # delete-before-add so re-running capture does not stack duplicate rules (idempotent)
+  adb shell "su 0 iptables -t nat -D OUTPUT -p tcp --dport 443 -m owner --uid-owner $uid -j DNAT --to-destination $gw:$MITM_PORT" 2>/dev/null || true
+  adb shell "su 0 iptables -t nat -A OUTPUT -p tcp --dport 443 -m owner --uid-owner $uid -j DNAT --to-destination $gw:$MITM_PORT"
+  adb shell "su 0 iptables -t nat -D POSTROUTING -p tcp -d $gw --dport $MITM_PORT -j MASQUERADE" 2>/dev/null || true
+  adb shell "su 0 iptables -t nat -A POSTROUTING -p tcp -d $gw --dport $MITM_PORT -j MASQUERADE"
+  # the app usually blocks on a runtime permission before it calls home
+  adb shell pm grant "$pkg" android.permission.POST_NOTIFICATIONS >/dev/null 2>&1 || true
+  cat <<EOF
+
+Capture is live. Open $pkg in the phone window (./phone ui) and use it.
+Decrypted requests go into Burp (127.0.0.1:8080) and to capture/traffic.log (./phone logs).
+Start Burp with its default proxy listener; if it is down, capture still logs direct.
+Stop and clear the redirect with:  ./phone uncapture $pkg
+EOF
+}
+
+cmd_go() {
+  local apk="${1:?usage: ./phone go <apk-or-split-dir>}"
+  if [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" != "1" ]; then cmd_up; fi
+  command adb connect "$SERIAL" >/dev/null 2>&1 || true
+  local before after pkg
+  before=$(adb shell pm list packages 2>/dev/null | sort || true)
+  install_one "$apk"
+  after=$(adb shell pm list packages 2>/dev/null | sort || true)
+  pkg=$(comm -13 <(printf '%s' "$before") <(printf '%s' "$after") | head -1 | sed 's/package://' | tr -d '\r')
+  if [ -z "$pkg" ]; then
+    echo "Could not auto-detect the package (already installed?). Run: ./phone capture <pkg>"
+    cmd_ui; return
+  fi
+  say "Detected package: $pkg"
+  cmd_capture "$pkg" || true
+  cmd_ui
+}
+
+cmd_uncapture() {
+  local pkg="${1:?usage: ./phone uncapture <package.name>}"
+  local uid
+  uid=$(adb shell dumpsys package "$pkg" 2>/dev/null | grep 'userId=' | head -1 | sed 's/.*userId=//' | tr -d '\r' || true)
+  [ -n "$uid" ] && adb shell "su 0 iptables -t nat -D OUTPUT -p tcp --dport 443 -m owner --uid-owner $uid -j DNAT --to-destination $(guest_gw):$MITM_PORT" 2>/dev/null || true
+  pkill -f "mitm/mitm_fwd.py" 2>/dev/null || true
+  echo "Redirect removed, MITM stopped."
+}
+
+cmd_logs()  { tail -f capture/traffic.log 2>/dev/null || echo "No capture/traffic.log yet (start ./phone capture first)."; }
+cmd_shell() { command adb connect "$SERIAL" >/dev/null 2>&1 || true; adb shell; }
+cmd_down()  { pkill -f "mitm/mitm_fwd.py" 2>/dev/null || true; compose down; }
+cmd_wipe()  {
+  if [ "${FORCE:-}" != "1" ]; then
+    printf 'Delete the phone data in ./data (factory reset)? type yes: '
+    local ans=""; read -r ans || true
+    [ "$ans" = "yes" ] || { echo "Aborted."; return 1; }
+  fi
+  cmd_down; rm -rf ./data; echo "Wiped ./data. Next ./phone up is a fresh phone."
+}
+
+# fail fast with a clear message if the host is missing docker/adb, for the verbs that need them
+case "${1:-}" in go|up|apk|ui|capture|uncapture|shell|down|wipe) need_core ;; esac
+
+case "${1:-}" in
+  go)        shift; cmd_go "${1:-}" ;;
+  up)        shift; cmd_up "${1:-}" ;;
+  apk)       shift; cmd_apk "${1:-}" ;;
+  ui)        cmd_ui ;;
+  capture)   shift; cmd_capture "${1:-}" ;;
+  uncapture) shift; cmd_uncapture "${1:-}" ;;
+  logs)      cmd_logs ;;
+  shell)     cmd_shell ;;
+  down)      cmd_down ;;
+  wipe)      cmd_wipe ;;
+  *) grep -E '^#( |$)' "$0" | sed 's/^# \{0,1\}//' | head -22 ;;
+esac
