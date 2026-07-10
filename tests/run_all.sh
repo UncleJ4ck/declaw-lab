@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run the whole declaw-env test suite: unit + parser fuzz, shell helpers + arg-fuzz,
+# Run the whole declaw-lab test suite: unit + parser fuzz, shell helpers + arg-fuzz,
 # network fuzz, stress/leak regression, and the android monkey.
 set -u
 cd "$(dirname "$0")"

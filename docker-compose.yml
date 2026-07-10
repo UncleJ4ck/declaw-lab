@@ -1,4 +1,4 @@
-# declaw-env: a throwaway Android phone in a container, for testing declaw-patched apps.
+# declaw-lab: a throwaway Android phone in a container, for testing declaw-patched apps.
 #
 # `docker compose up -d` boots a rooted Android 11 in about 6 seconds. It runs on the
 # host kernel (no QEMU), and its ABI list is x86_64 + arm64-v8a + armeabi-v7a, so the

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# declaw-env control script. One phone, a few verbs.
+# declaw-lab control script. One phone, a few verbs.
 #
 #   ./phone go APK         one shot: boot + install + wire Burp + open the phone
 #   ./phone up [VER]       boot the phone (VER=11 default, or 12/13; or ANDROID=13 ./phone up)
@@ -33,7 +33,7 @@ adb() { command adb -s "$SERIAL" "$@"; }
 say() { printf '\n>> %s\n' "$*"; }
 
 # type -P finds the PATH binary only, so it is not fooled by the adb() function above.
-need() { type -P "$1" >/dev/null 2>&1 || { echo "declaw-env needs '$1'. Install it (${2:-your package manager})." >&2; exit 1; }; }
+need() { type -P "$1" >/dev/null 2>&1 || { echo "declaw-lab needs '$1'. Install it (${2:-your package manager})." >&2; exit 1; }; }
 need_core() { need docker "docker"; need adb "android-tools / platform-tools"; }
 
 # docker compose v2 plugin, or the v1 docker-compose standalone, whichever exists

@@ -9,6 +9,10 @@ app: Flutter's network stack ignores the system proxy, so the classic proxy setu
 zero traffic. This gives you a device where the whole capture chain already works, as long
 as the APK was unpinned by [declaw](https://github.com/UncleJ4ck/declaw) first.
 
+<p align="center">
+  <img src="docs/interactive.png" alt="An Android phone you drive from your desktop" width="300">
+</p>
+
 ## What you bring
 
 Any APK you patched with declaw. declaw flips the app's certificate check to always-accept,
@@ -42,6 +46,8 @@ cp ~/path/to/your-app-patched.apk apks/
 It detects the package it installed, starts capturing it into Burp, and opens the window.
 Start Burp first (stock listener on `127.0.0.1:8080`) and the app's requests land in its
 history. No Burp? It still captures to a decrypted log.
+
+![Deploy and control the phone](docs/deploy.png)
 
 The steps are there separately if you want them:
 

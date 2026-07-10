@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Forwarding MITM for declaw-env. Runs on the HOST with the stdlib only.
+# Forwarding MITM for declaw-lab. Runs on the HOST with the stdlib only.
 #
 # The phone's apps are declaw-patched (ssl_verify_peer_cert forced to OK), so they
 # accept ANY server certificate. This terminates their TLS with a throwaway self-signed
