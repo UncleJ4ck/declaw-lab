@@ -13,6 +13,21 @@ as the APK was unpinned by [declaw](https://github.com/UncleJ4ck/declaw) first.
   <img src="docs/interactive.png" alt="An Android phone you drive from your desktop" width="300">
 </p>
 
+## Backends: pick your device
+
+declaw-env deploys the target device three ways. Pick by what you are testing:
+
+| Backend | Command | Device | Speed | Root | Use it for |
+|---|---|---|---|---|---|
+| **redroid** | `./phone` | Android 11 container | boots ~6s | yes | Fast interactive capture; arm libs via translation |
+| **qemu** | `./avd/lab qemu` | REAL aarch64 Android 16 (QEMU/TCG) | ~4 min boot | yes | declaw's arm64-only primitives (mempatch, HWBP) |
+| **avd** | `./avd/lab avd` | x86_64 Android (Google emulator, KVM) | fast | yes | OkHttp / NSC / static-Flutter-patch testing |
+
+The qemu backend is the only one that runs REAL arm64: no hypervisor accelerates a
+foreign ISA on an x86 host, so it is software CPU (TCG) tuned as hard as it goes
+(MTTCG across P-cores, `pauth-impdef`). See `docs/arm64-testing.md`. Each backend
+is `provision` (one-time prep) then `up` / `root` / `ca` / `shell` / `status` / `down`.
+
 ## What you bring
 
 Any APK you patched with declaw. declaw flips the app's certificate check to always-accept,

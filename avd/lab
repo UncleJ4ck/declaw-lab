@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+# declaw-env lab: deploy a rooted Android to test declaw, pentester-style.
+#
+# Two backends, pick per what you are testing:
+#   qemu  REAL aarch64 Android 16 under qemu-system-aarch64 (TCG, rooted).
+#         Slower (no hypervisor accelerates a foreign ISA on x86), but the ONLY
+#         way to exercise declaw's arm64-only primitives: mempatch and HWBP.
+#   avd   x86_64 Android via the Google emulator (KVM, rooted, fast).
+#         Great for OkHttp/NSC/static-Flutter-patch testing; arm apps run under
+#         ndk-translation; does NOT validate the arm64-native primitives.
+#
+# Usage: lab <qemu|avd> <command>
+#   provision   one-time: fetch + prepare a rooted-ready image
+#   up          boot headless
+#   root        get a root adb shell (uid 0)
+#   shell       adb shell
+#   ca [pem]    install a CA (default: mitmproxy) so TLS decrypts
+#   status      show state
+#   down        stop
+set -euo pipefail
+HERE="$(cd "$(dirname "$0")" && pwd)"
+SDK="${ANDROID_SDK_ROOT:-$HOME/Android/sdk}"
+export ANDROID_SDK_ROOT="$SDK" ANDROID_HOME="$SDK"
+export PATH="$SDK/platform-tools:$SDK/emulator:$SDK/cmdline-tools/latest/bin:$PATH"
+# avdmanager/emulator need a valid JDK; the shell's JAVA_HOME is often stale.
+if [ ! -x "${JAVA_HOME:-/nonexistent}/bin/java" ]; then
+  for j in java-17-openjdk java-21-openjdk java-17 default; do
+    [ -x "/usr/lib/jvm/$j/bin/java" ] && { export JAVA_HOME="/usr/lib/jvm/$j"; break; }
+  done
+fi
+
+usage() { sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+[ $# -ge 2 ] || usage 1
+BACKEND="$1"; CMD="$2"; shift 2
+
+# ---------------------------------------------------------------- qemu (arm64)
+QPORT=6555; QDEV="localhost:$QPORT"; QRUN="$HOME/Android/lineage-arm64/run"
+qemu_up() {
+  pgrep -f 'qemu-system-aarch64.*declaw-lineage' >/dev/null && { echo "[qemu] already up"; return; }
+  [ -f "$HOME/Android/lineage-arm64/vda.raw" ] || { echo "[qemu] run 'lab qemu provision' first"; exit 1; }
+  nohup "$HERE/boot-arm64.sh" >/tmp/declaw-qemu.log 2>&1 &
+  echo "[qemu] booting (headless, ~4 min first time). tail /tmp/declaw-qemu.log"
+}
+qemu_down() {
+  local mon="$QRUN/mon.sock"
+  [ -S "$mon" ] && echo quit | socat - "UNIX-CONNECT:$mon" >/dev/null 2>&1 || true
+  sleep 2; pgrep -f 'qemu-system-aarch64.*declaw-lineage' >/dev/null && echo "[qemu] still up" || echo "[qemu] down"
+}
+qemu_status() {
+  pgrep -f 'qemu-system-aarch64.*declaw-lineage' >/dev/null && echo "[qemu] running" || { echo "[qemu] stopped"; return; }
+  adb connect "$QDEV" >/dev/null 2>&1
+  adb -s "$QDEV" shell 'echo up: uid=$(id -u) $(getprop ro.build.version.release) $(uname -m) selinux=$(getenforce)' 2>/dev/null | tr -d '\r'
+}
+
+# ---------------------------------------------------------------- avd (x86_64)
+AVD_NAME=declaw_x86_64; AVD_IMG="system-images;android-33;google_apis;x86_64"
+avd_provision() { ABI=x86_64 "$HERE/setup.sh"; echo "no" | avdmanager create avd -n "$AVD_NAME" -k "$AVD_IMG" -d pixel_6 --force >/dev/null; echo "[avd] ready ($AVD_NAME)"; }
+avd_running() { pgrep -f -- "-avd $AVD_NAME" >/dev/null; }
+# adb -e/-d are unreliable when TCP devices (the qemu rig) are also connected, so
+# target the real emulator-<port> serial explicitly.
+avd_serial() { adb devices | awk '/^emulator-/{print $1; exit}'; }
+avd_up() {
+  avd_running && { echo "[avd] already up"; return; }
+  emulator -list-avds 2>/dev/null | grep -qx "$AVD_NAME" || { echo "[avd] run 'lab avd provision' first"; exit 1; }
+  nohup emulator -avd "$AVD_NAME" -no-window -no-audio -no-boot-anim -no-snapshot \
+    -writable-system -gpu swiftshader_indirect -no-metrics >/tmp/declaw-avd.log 2>&1 &
+  echo "[avd] booting (KVM). tail /tmp/declaw-avd.log"
+}
+avd_root() {
+  local S; S="$(avd_serial)"; [ -n "$S" ] || { echo "[avd] not up"; exit 1; }
+  adb -s "$S" root >/dev/null 2>&1; sleep 2; adb -s "$S" wait-for-device
+  adb -s "$S" remount >/dev/null 2>&1 || { adb -s "$S" disable-verity >/dev/null 2>&1; adb -s "$S" reboot; adb -s "$S" wait-for-device; adb -s "$S" root >/dev/null 2>&1; sleep 2; adb -s "$S" remount >/dev/null 2>&1; }
+  adb -s "$S" shell id 2>&1 | tr -d '\r'
+}
+avd_down() { local S; S="$(avd_serial)"; [ -n "$S" ] && adb -s "$S" emu kill >/dev/null 2>&1 || true; echo "[avd] stopped"; }
+avd_status() {
+  local S; S="$(avd_serial)"; [ -n "$S" ] || { echo "[avd] no emulator"; return; }
+  adb -s "$S" shell 'echo up: uid=$(id -u) $(getprop ro.build.version.release) $(getprop ro.product.cpu.abi) selinux=$(getenforce)' 2>/dev/null | tr -d '\r'
+}
+
+case "$BACKEND:$CMD" in
+  qemu:provision) "$HERE/provision.sh" ;;
+  qemu:up)        qemu_up ;;
+  qemu:root)      "$HERE/adb-root.sh" ;;
+  qemu:shell)     adb connect "$QDEV" >/dev/null 2>&1; exec adb -s "$QDEV" shell "$@" ;;
+  qemu:ca)        "$HERE/install-ca.sh" "$QDEV" "$@" ;;
+  qemu:status)    qemu_status ;;
+  qemu:down)      qemu_down ;;
+  avd:provision)  avd_provision ;;
+  avd:up)         avd_up ;;
+  avd:root)       avd_root ;;
+  avd:shell)      exec adb -s "$(avd_serial)" shell "$@" ;;
+  avd:ca)         "$HERE/install-ca.sh" "$(avd_serial)" "$@" ;;
+  avd:status)     avd_status ;;
+  avd:down)       avd_down ;;
+  *) echo "unknown: $BACKEND $CMD"; usage 1 ;;
+esac
