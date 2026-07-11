@@ -9,4 +9,8 @@ apks/*/
 
 # MITM runtime artifacts
 avd/mitm/*.pem
+avd/mitm/certs/
 capture/traffic.log
+
+# python
+__pycache__/
