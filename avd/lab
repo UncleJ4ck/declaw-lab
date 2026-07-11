@@ -184,6 +184,29 @@ burp_status() {
   fi
 }
 app_uid() { adb -s "$1" shell "pm list packages -U $2" 2>/dev/null | tr -d '\r' | sed -n 's/.*uid://p' | head -1; }
+# Self-check: is the redirect actually yielding plaintext? A decrypted request logs as REQ;
+# a rejected cert logs as TLS_FAIL. Only TLS_FAIL means the app is not declaw-patched here,
+# OR it is cronet/HTTP3 (QUIC over UDP, which a MITM cannot see -> use friTap keylog instead).
+capture_verify() {  # $1 serial(unused)  $2 pkg-or-empty
+  local pkg="${2:-}" base req=0 fail=0
+  base=$(wc -l < "$TRAFFIC_LOG_FILE" 2>/dev/null || echo 0)
+  echo "[verify] watching ~10s. Drive the app in the UI window (a relaunch here would reset it)..."
+  for _ in $(seq 1 5); do
+    sleep 2
+    req=$(tail -n +"$((base + 1))" "$TRAFFIC_LOG_FILE" 2>/dev/null | grep -c '] REQ ' || true)
+    if [ "${req:-0}" -gt 0 ]; then break; fi
+  done
+  fail=$(tail -n +"$((base + 1))" "$TRAFFIC_LOG_FILE" 2>/dev/null | grep -c 'TLS_FAIL' || true)
+  if [ "${req:-0}" -gt 0 ]; then
+    echo "[verify] OK: decrypting ($req plaintext request(s)). The bypass works."
+  elif [ "${fail:-0}" -gt 0 ]; then
+    echo "[verify] cert REJECTED ($fail TLS_FAIL): the app is not declaw-patched here, OR it is"
+    echo "[verify] cronet/HTTP3 (QUIC over UDP, invisible to a MITM). For QUIC use keylog:"
+    echo "[verify]   declaw ${pkg:-<pkg>} --capture   (friTap SSLKEYLOG + pcap, decrypt in Wireshark)"
+  else
+    echo "[verify] no app TLS seen yet; drive the app in the UI window and watch below."
+  fi
+}
 # capture [apk|pkg]: the one decrypt command. With an .apk (or split dir) it installs it
 # first; with a package it scopes to that app; with nothing it redirects all HTTPS. Then
 # it points the app's 443 at the host MITM and follows the decrypted log (Ctrl-C to stop
@@ -192,13 +215,13 @@ do_capture() {
   adb connect "$1" >/dev/null 2>&1
   adb -s "$1" shell id -u 2>/dev/null | grep -q '^0' || { echo "[capture] need root (lab $BACKEND root)"; exit 1; }
   adb -s "$1" shell "iptables -t nat -L OUTPUT -n" >/dev/null 2>&1 || { echo "[capture] guest has no nat table"; exit 1; }
-  local arg="${2:-}" own="" who="all apps"
+  local arg="${2:-}" own="" who="all apps" vpkg=""
   if [ -n "$arg" ] && [ -e "$arg" ]; then
     echo "[capture] installing $arg"
     if [ -d "$arg" ]; then adb -s "$1" install-multiple -r "$arg"/*.apk; else adb -s "$1" install -r "$arg"; fi
     arg=""
   fi
-  if [ -n "$arg" ]; then local uid; uid="$(app_uid "$1" "$arg")"; [ -n "$uid" ] || { echo "[capture] $arg not installed"; exit 1; }; own="-m owner --uid-owner $uid"; who="$arg (uid $uid)"; fi
+  if [ -n "$arg" ]; then local uid; uid="$(app_uid "$1" "$arg")"; [ -n "$uid" ] || { echo "[capture] $arg not installed"; exit 1; }; own="-m owner --uid-owner $uid"; who="$arg (uid $uid)"; vpkg="$arg"; fi
   mitm_start
   adb -s "$1" shell "
     sysctl -w net.ipv4.conf.all.route_localnet=1 >/dev/null 2>&1
@@ -207,6 +230,7 @@ do_capture() {
     iptables -t nat -C POSTROUTING -p tcp -d $GW --dport $MITMP -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -p tcp -d $GW --dport $MITMP -j MASQUERADE
   "
   burp_status
+  capture_verify "$1" "$vpkg"
   echo "[capture] $who HTTPS -> host MITM (:$MITMP). Following the plaintext log (Ctrl-C stops watching; the redirect stays until 'lab $BACKEND down'):"
   exec tail -n +1 -f "$TRAFFIC_LOG_FILE"
 }
