@@ -1,27 +1,24 @@
 #!/usr/bin/env bash
-# declaw-env lab: deploy a rooted Android to test declaw, pentester-style.
+# declaw-env lab: one command to a rooted Android that decrypts an app's HTTPS into Burp.
 #
-# Two backends, pick per what you are testing:
-#   qemu  REAL aarch64 Android 16 under qemu-system-aarch64 (TCG, rooted).
-#         Slower (no hypervisor accelerates a foreign ISA on x86), but the ONLY
-#         way to exercise declaw's arm64-only primitives: mempatch and HWBP.
-#   avd   x86_64 Android via the Google emulator (KVM, rooted, fast).
-#         Great for OkHttp/NSC/static-Flutter-patch testing; arm apps run under
-#         ndk-translation; does NOT validate the arm64-native primitives.
+# Backend is the optional first arg (default qemu):
+#   qemu  REAL aarch64 Android 16 (qemu TCG, rooted). The ONLY backend that runs
+#         declaw's arm64-only primitives (mempatch, HWBP). Slower.
+#   avd   x86_64 Android (Google emulator, KVM, rooted). Fast; OkHttp/NSC/Flutter.
 #
-# Usage: lab [qemu|avd] [command]        default backend qemu, default command go
-#   go          DEFAULT: boot (if needed) + root + open UI window + root shell
-#   provision   one-time: fetch + prepare a rooted-ready image
-#   up          boot headless
-#   root        get a root adb shell (uid 0)
-#   shell       adb shell
-#   ui          open an interactive window (scrcpy)
-#   capture [X] decrypt HTTPS. X = an .apk to install first, a package to scope, or
-#               nothing for all apps. Starts the MITM, redirects 443, follows the log.
-#   probe P L O confirm L@O is the LIVE ssl_verify_peer_cert in pkg P: writes a BRK,
-#               you drive one request, it says HIT (on the path) or miss (the decoy).
-#   status      show state
-#   down        stop (also stops the MITM)
+# Usage: lab [qemu|avd] [command | apk | package]     default: qemu, boot+root+UI+shell
+#   (nothing)   boot (if needed) + root + UI window + root shell
+#   APK | PKG   boot + install (if APK) + send that app's HTTPS to Burp + UI  [pentest one-liner]
+#   capture [X] same as passing X: X = .apk to install, a package to scope, or nothing for
+#               all apps. Decrypts to Burp (127.0.0.1:8080) and capture/traffic.log.
+#   probe P L O confirm L@O is the LIVE ssl_verify_peer_cert in pkg P (BRK; you drive 1 request).
+#   provision   one-time: fetch + prepare a rooted image
+#   up root shell ui   the individual steps, all folded into the default
+#   status | down      show state | stop (also stops the MITM)
+#
+# Burp: just run Burp with its default proxy listener. declaw-patched apps trust ANY
+# cert, so there is NO device CA to install. Point elsewhere with BURP=host:port, or
+# BURP= (empty) to skip Burp and only write the log.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SDK="${ANDROID_SDK_ROOT:-$HOME/Android/sdk}"
@@ -34,12 +31,16 @@ if [ ! -x "${JAVA_HOME:-/nonexistent}/bin/java" ]; then
   done
 fi
 
-usage() { sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 case "${1:-}" in -h|--help|help) usage 0 ;; esac
-# Default UX: `lab` -> `lab qemu go`, `lab <backend>` -> `lab <backend> go`.
-# go = boot (if needed) + root + open the UI window + drop into a root shell.
-BACKEND="${1:-qemu}"; CMD="${2:-go}"
-if [ $# -ge 2 ]; then shift 2; elif [ $# -ge 1 ]; then shift; fi
+# Backend is an optional first arg. Then a known subcommand runs as-is; anything else
+# (a bare apk/dir/package, or nothing) means the default `go`, which captures that target.
+BACKEND=qemu
+case "${1:-}" in qemu|avd) BACKEND="$1"; shift ;; esac
+case "${1:-}" in
+  go|provision|up|root|shell|ui|capture|probe|status|down) CMD="$1"; shift ;;
+  *) CMD=go ;;   # empty or a bare apk/pkg -> go [target]
+esac
 
 # ---------------------------------------------------------------- qemu (arm64)
 QPORT=6555; QDEV="localhost:$QPORT"; QRUN="$HOME/Android/lineage-arm64/run"
@@ -60,19 +61,26 @@ qemu_status() {
   adb connect "$QDEV" >/dev/null 2>&1
   adb -s "$QDEV" shell 'echo up: uid=$(id -u) $(getprop ro.build.version.release) $(uname -m) selinux=$(getenforce)' 2>/dev/null | tr -d '\r'
 }
-qemu_go() {
+qemu_ensure() {  # boot (if needed) + wait + root; returns with the device up and rooted
   [ -f "$HOME/Android/lineage-arm64/vda.raw" ] || { echo "[qemu] run 'lab qemu provision' first"; exit 1; }
   qemu_up; echo "[qemu] waiting for boot (first cold boot ~4 min)..."
-  adb connect "$QDEV" >/dev/null 2>&1
+  adb connect "$QDEV" >/dev/null 2>&1 || true
   for _ in $(seq 1 90); do
     [ "$(timeout 6 adb -s "$QDEV" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = 1 ] && break
     pgrep -f 'qemu-system-aarch64.*declaw-lineage' >/dev/null || { echo "[qemu] boot failed, see /tmp/declaw-qemu.log"; exit 1; }
-    sleep 8; adb connect "$QDEV" >/dev/null 2>&1
+    sleep 8; adb connect "$QDEV" >/dev/null 2>&1 || true
   done
   "$HERE/adb-root.sh" >/dev/null 2>&1 || echo "[qemu] warning: root not confirmed"
+}
+qemu_go() {  # $1 optional capture target (apk / split dir / package)
+  qemu_ensure
   ui "$QDEV" qemu
-  echo "[qemu] root shell. device + window stay up on exit ('lab qemu down' to stop)."
-  exec adb -s "$QDEV" shell
+  if [ -n "${1:-}" ]; then
+    do_capture "$QDEV" "$1"          # install/redirect to Burp, then follows the log (blocks)
+  else
+    echo "[qemu] root shell. device + window stay up on exit ('lab qemu down' to stop)."
+    exec adb -s "$QDEV" shell
+  fi
 }
 
 # ---------------------------------------------------------------- avd (x86_64)
@@ -100,7 +108,7 @@ avd_status() {
   local S; S="$(avd_serial)"; [ -n "$S" ] || { echo "[avd] no emulator"; return; }
   adb -s "$S" shell 'echo up: uid=$(id -u) $(getprop ro.build.version.release) $(getprop ro.product.cpu.abi) selinux=$(getenforce)' 2>/dev/null | tr -d '\r'
 }
-avd_go() {
+avd_ensure() {  # boot (if needed) + wait + root; returns with the device up and rooted
   emulator -list-avds 2>/dev/null | grep -qx "$AVD_NAME" || { echo "[avd] run 'lab avd provision' first"; exit 1; }
   avd_up; local S; echo "[avd] waiting for boot..."
   for _ in $(seq 1 50); do
@@ -109,9 +117,17 @@ avd_go() {
     sleep 6
   done
   avd_root >/dev/null 2>&1 || echo "[avd] warning: root not confirmed"
-  ui "$(avd_serial)" avd
-  echo "[avd] root shell. device + window stay up on exit ('lab avd down' to stop)."
-  exec adb -s "$(avd_serial)" shell
+}
+avd_go() {  # $1 optional capture target (apk / split dir / package)
+  avd_ensure
+  local S; S="$(avd_serial)"
+  ui "$S" avd
+  if [ -n "${1:-}" ]; then
+    do_capture "$S" "$1"
+  else
+    echo "[avd] root shell. device + window stay up on exit ('lab avd down' to stop)."
+    exec adb -s "$S" shell
+  fi
 }
 
 # ---------------------------------------------------------------- UI (scrcpy)
@@ -142,14 +158,30 @@ ui() {  # $1 serial  $2 label
 # an iptables DNAT of that app's 443 to the host MITM. Decrypted flows go to Burp
 # (127.0.0.1:8080) if up, and always to capture/traffic.log.
 GW=10.0.2.2; MITMP="${MITM_PORT:-8083}"
+BURP="${BURP-127.0.0.1:8080}"        # default listener; BURP= (empty) skips Burp, log only
 TRAFFIC_LOG_FILE="$HERE/../capture/traffic.log"
 mitm_start() {
-  pgrep -f 'mitm/mitm_fwd.py' >/dev/null && return
+  # reuse only if something already listens on OUR port; a mitm on a different port
+  # must not make us skip (the DNAT points at $MITMP).
+  (exec 3<>"/dev/tcp/127.0.0.1/$MITMP") 2>/dev/null && { exec 3>&-; return; }
   command -v python3 >/dev/null || { echo "[mitm] need python3"; exit 1; }
   mkdir -p "$(dirname "$TRAFFIC_LOG_FILE")"
-  MITM_BIND=0.0.0.0 MITM_PORT="$MITMP" TRAFFIC_LOG="$TRAFFIC_LOG_FILE" \
+  MITM_BIND=0.0.0.0 MITM_PORT="$MITMP" TRAFFIC_LOG="$TRAFFIC_LOG_FILE" BURP="$BURP" \
     nohup python3 "$HERE/mitm/mitm_fwd.py" >/tmp/declaw-mitm.log 2>&1 &
   sleep 1
+}
+# Tell the pentester exactly where their decrypted traffic goes. The whole point of
+# declaw is that the app trusts ANY cert, so Burp needs only its default proxy listener
+# and there is never a device CA to install.
+burp_status() {
+  [ -n "$BURP" ] || { echo "[burp] off (BURP empty): flows decrypt to the log only"; return; }
+  local bh="${BURP%:*}" bp="${BURP##*:}"
+  if (exec 3<>"/dev/tcp/$bh/$bp") 2>/dev/null; then exec 3>&-
+    echo "[burp] connected $BURP: decrypted requests land in Burp's HTTP history. No device CA needed."
+  else
+    echo "[burp] $BURP not reachable. Start Burp (Proxy > default listener 127.0.0.1:8080) and re-run;"
+    echo "[burp] until then flows still decrypt to the log. A device CA is never needed (app trusts any cert)."
+  fi
 }
 app_uid() { adb -s "$1" shell "pm list packages -U $2" 2>/dev/null | tr -d '\r' | sed -n 's/.*uid://p' | head -1; }
 # capture [apk|pkg]: the one decrypt command. With an .apk (or split dir) it installs it
@@ -174,7 +206,8 @@ do_capture() {
     iptables -t nat -A OUTPUT -p tcp --dport 443 $own -j DNAT --to-destination $GW:$MITMP
     iptables -t nat -C POSTROUTING -p tcp -d $GW --dport $MITMP -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -p tcp -d $GW --dport $MITMP -j MASQUERADE
   "
-  echo "[capture] $who HTTPS -> host MITM. Burp 127.0.0.1:8080 if up. Following (Ctrl-C to stop):"
+  burp_status
+  echo "[capture] $who HTTPS -> host MITM (:$MITMP). Following the plaintext log (Ctrl-C stops watching; the redirect stays until 'lab $BACKEND down'):"
   exec tail -n +1 -f "$TRAFFIC_LOG_FILE"
 }
 mitm_stop() { pkill -f 'avd/mitm/mitm_fwd.py' 2>/dev/null || true; }
@@ -227,8 +260,8 @@ do_probe() {  # $1=dev $2=pkg $3=lib-substr $4=hex-offset
 }
 
 case "$BACKEND:$CMD" in
-  qemu:go)        qemu_go ;;
-  qemu:capture)   do_capture "$QDEV" "${1:-}" ;;
+  qemu:go)        qemu_go "${1:-}" ;;
+  qemu:capture)   qemu_ensure; do_capture "$QDEV" "${1:-}" ;;
   qemu:probe)     do_probe "$QDEV" "$@" ;;
   qemu:provision) "$HERE/provision.sh" ;;
   qemu:up)        qemu_up ;;
@@ -237,8 +270,8 @@ case "$BACKEND:$CMD" in
   qemu:ui)        adb connect "$QDEV" >/dev/null 2>&1; ui "$QDEV" qemu ;;
   qemu:status)    qemu_status ;;
   qemu:down)      qemu_down ;;
-  avd:go)         avd_go ;;
-  avd:capture)    do_capture "$(avd_serial)" "${1:-}" ;;
+  avd:go)         avd_go "${1:-}" ;;
+  avd:capture)    avd_ensure; do_capture "$(avd_serial)" "${1:-}" ;;
   avd:probe)      do_probe "$(avd_serial)" "$@" ;;
   avd:provision)  avd_provision ;;
   avd:up)         avd_up ;;

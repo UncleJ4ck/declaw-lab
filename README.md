@@ -41,29 +41,37 @@ interactive window, and drops you in a root shell:
 
 The device and window stay up when you leave the shell; `./lab <backend> down` stops it.
 
-Decrypt an app's HTTPS with one command:
+Decrypt an app's HTTPS into Burp with one command. Start Burp (its default proxy
+listener is enough), then pass the app straight to `lab`:
 
 ```bash
-./lab qemu capture ~/app-patched.apk   # install it, redirect 443, follow the plaintext
-./lab qemu capture                     # or: redirect everything already on the device
+./lab ~/app-patched.apk           # boot + install + send its HTTPS to Burp + UI window
+./lab com.the.app                 # same for an app already installed
+./lab avd ~/app-patched.apk       # same on the x86_64 emulator
 ```
 
-`capture` points the app's TLS at a host MITM. declaw-patched (or mempatched) apps accept
-any cert, so the MITM reads the plaintext, logs it, and forwards it into Burp if Burp is up
-(127.0.0.1:8080). Unpatched apps reject the cert, which is the point: declaw is what makes
-them accept it.
+A bare apk or package is the pentest one-liner: it boots the device if needed, installs
+(for an apk), points that app's TLS at a host MITM, and opens the UI window. declaw-patched
+(or mempatched) apps accept any cert, so the MITM terminates the TLS, reads the plaintext,
+and forwards it into Burp. **There is no device CA to install** (that is the whole point:
+declaw is what makes the app accept the cert). Unpatched apps reject it, which is the
+negative control.
+
+Burp: point elsewhere with `BURP=host:port ./lab ...`, or `BURP= ./lab ...` to skip Burp
+and only write `capture/traffic.log`.
 
 ## Commands
 
+Backend is an optional first arg (`qemu` default, or `avd`). Everything folds into the
+default, so most sessions are just `lab <apk>`:
+
 ```
-(none)      boot (if needed) + root + UI window + root shell   [the default]
+(nothing)   boot (if needed) + root + UI window + root shell   [the default]
+APK | PKG   boot + install (apk) + send that app's HTTPS to Burp + UI   [pentest one-liner]
+capture [X] the same, explicit. X = .apk to install, package to scope, or nothing for all apps
+probe P L O confirm L@O is the LIVE ssl_verify_peer_cert in pkg P (BRK; you drive 1 request)
 provision   one-time: fetch + prepare a rooted-ready image
-up          boot headless
-root        root adb shell (uid 0)
-shell       adb shell
-ui          interactive window (scrcpy)
-capture [X] decrypt HTTPS. X = an .apk to install first, a package to scope, or nothing
-            for all apps. Starts the MITM, redirects 443, follows the log.
+up root shell ui   the individual steps (all folded into the default)
 status      uid / android version / arch / selinux
 down        stop (also stops the MITM)
 ```
