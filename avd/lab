@@ -18,6 +18,8 @@
 #   ui          open an interactive window (scrcpy)
 #   capture [X] decrypt HTTPS. X = an .apk to install first, a package to scope, or
 #               nothing for all apps. Starts the MITM, redirects 443, follows the log.
+#   probe P L O confirm L@O is the LIVE ssl_verify_peer_cert in pkg P: writes a BRK,
+#               you drive one request, it says HIT (on the path) or miss (the decoy).
 #   status      show state
 #   down        stop (also stops the MITM)
 set -euo pipefail
@@ -32,7 +34,7 @@ if [ ! -x "${JAVA_HOME:-/nonexistent}/bin/java" ]; then
   done
 fi
 
-usage() { sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 case "${1:-}" in -h|--help|help) usage 0 ;; esac
 # Default UX: `lab` -> `lab qemu go`, `lab <backend>` -> `lab <backend> go`.
 # go = boot (if needed) + root + open the UI window + drop into a root shell.
@@ -177,9 +179,57 @@ do_capture() {
 }
 mitm_stop() { pkill -f 'avd/mitm/mitm_fwd.py' 2>/dev/null || true; }
 
+# ---------------------------------------------------------------- BRK-probe
+# BoringSSL ships ssl_verify_peer_cert (patch this) and a near-identical
+# ssl_reverify_peer_cert decoy (patching it is a silent no-op). `declaw find_verify`
+# picks the live one statically; this confirms it dynamically. It writes a BRK #0 at
+# lib@offset; if the app takes SIGTRAP there while you drive one request, that offset
+# is on the live handshake path.
+mempoke_stage() {  # $1=dev ; build (once) + push the peek/poke helper
+  local dev="$1" bin="$HERE/bin/mempoke-arm64"
+  if [ ! -x "$bin" ]; then
+    command -v aarch64-linux-gnu-gcc >/dev/null || { echo "[probe] need aarch64-linux-gnu-gcc to build mempoke" >&2; return 1; }
+    mkdir -p "$HERE/bin"
+    aarch64-linux-gnu-gcc -O2 -static -no-pie -o "$bin" "$HERE/mempoke.c" || return 1
+  fi
+  adb -s "$dev" push "$bin" /data/local/tmp/mempoke >/dev/null && adb -s "$dev" shell chmod 755 /data/local/tmp/mempoke
+}
+do_probe() {  # $1=dev $2=pkg $3=lib-substr $4=hex-offset
+  local dev="$1" pkg="${2:-}" lib="${3:-}" off="${4:-}"
+  { [ -n "$pkg" ] && [ -n "$lib" ] && [ -n "$off" ]; } || { echo "usage: lab <backend> probe <pkg> <lib-substr> <hex-offset>"; exit 1; }
+  adb connect "$dev" >/dev/null 2>&1 || true
+  mempoke_stage "$dev" || exit 1
+  local pid; pid="$(adb -s "$dev" shell pidof "$pkg" 2>/dev/null | tr -d '\r' || true)"
+  [ -n "$pid" ] || { echo "[probe] $pkg not running; launch it first"; exit 1; }
+  local res addr before
+  res="$(adb -s "$dev" shell /data/local/tmp/mempoke "$pid" "$lib" "$off" = 000020d4 2>&1 | tr -d '\r' || true)"
+  addr="$(printf '%s' "$res" | sed -n 's/.*addr=\(0x[0-9a-f]*\).*/\1/p')"
+  before="$(printf '%s' "$res" | sed -n 's/.*before=\([0-9a-f]\{8\}\).*/\1/p')"
+  [ -n "$addr" ] || { echo "[probe] could not arm BRK: $res"; exit 1; }
+  adb -s "$dev" shell logcat -c >/dev/null 2>&1 || true
+  echo "[probe] BRK armed at $lib@$off ($addr) in pid $pid. Exercise the app's TLS now; watching 40s..."
+  local hit=""
+  for _ in $(seq 1 20); do
+    if adb -s "$dev" shell logcat -d -t 400 2>/dev/null | grep -q "SIGTRAP.*$addr"; then hit=1; break; fi
+    sleep 2
+  done
+  if [ -n "$hit" ]; then
+    echo "[probe] HIT: $lib@$off IS on the live handshake path. Patch it: declaw --mode mempatch --offset $lib@$off"
+    echo "[probe] (the app took the SIGTRAP and died; relaunch it.)"
+  else
+    echo "[probe] miss: $lib@$off was NOT executed in 40s. Likely the ssl_reverify_peer_cert decoy or a wrong offset."
+    echo "[probe] get the live offset with: python -m declaw.find_verify <lib.so>"
+    if [ -n "$before" ]; then
+      adb -s "$dev" shell /data/local/tmp/mempoke "$pid" "$lib" "$off" = "$before" >/dev/null 2>&1 || true
+      echo "[probe] restored original bytes at $addr."
+    fi
+  fi
+}
+
 case "$BACKEND:$CMD" in
   qemu:go)        qemu_go ;;
   qemu:capture)   do_capture "$QDEV" "${1:-}" ;;
+  qemu:probe)     do_probe "$QDEV" "$@" ;;
   qemu:provision) "$HERE/provision.sh" ;;
   qemu:up)        qemu_up ;;
   qemu:root)      "$HERE/adb-root.sh" ;;
@@ -189,6 +239,7 @@ case "$BACKEND:$CMD" in
   qemu:down)      qemu_down ;;
   avd:go)         avd_go ;;
   avd:capture)    do_capture "$(avd_serial)" "${1:-}" ;;
+  avd:probe)      do_probe "$(avd_serial)" "$@" ;;
   avd:provision)  avd_provision ;;
   avd:up)         avd_up ;;
   avd:root)       avd_root ;;
