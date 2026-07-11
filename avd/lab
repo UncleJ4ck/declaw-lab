@@ -9,11 +9,13 @@
 #         Great for OkHttp/NSC/static-Flutter-patch testing; arm apps run under
 #         ndk-translation; does NOT validate the arm64-native primitives.
 #
-# Usage: lab <qemu|avd> <command>
+# Usage: lab [qemu|avd] [command]        default backend qemu, default command go
+#   go          DEFAULT: boot (if needed) + root + open UI window + root shell
 #   provision   one-time: fetch + prepare a rooted-ready image
 #   up          boot headless
 #   root        get a root adb shell (uid 0)
 #   shell       adb shell
+#   ui          open an interactive window (scrcpy: click, type, drive the app)
 #   ca [pem]    install a CA (default: mitmproxy) so TLS decrypts
 #   status      show state
 #   down        stop
@@ -29,9 +31,12 @@ if [ ! -x "${JAVA_HOME:-/nonexistent}/bin/java" ]; then
   done
 fi
 
-usage() { sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
-[ $# -ge 2 ] || usage 1
-BACKEND="$1"; CMD="$2"; shift 2
+usage() { sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+case "${1:-}" in -h|--help|help) usage 0 ;; esac
+# Default UX: `lab` -> `lab qemu go`, `lab <backend>` -> `lab <backend> go`.
+# go = boot (if needed) + root + open the UI window + drop into a root shell.
+BACKEND="${1:-qemu}"; CMD="${2:-go}"
+if [ $# -ge 2 ]; then shift 2; elif [ $# -ge 1 ]; then shift; fi
 
 # ---------------------------------------------------------------- qemu (arm64)
 QPORT=6555; QDEV="localhost:$QPORT"; QRUN="$HOME/Android/lineage-arm64/run"
@@ -50,6 +55,20 @@ qemu_status() {
   pgrep -f 'qemu-system-aarch64.*declaw-lineage' >/dev/null && echo "[qemu] running" || { echo "[qemu] stopped"; return; }
   adb connect "$QDEV" >/dev/null 2>&1
   adb -s "$QDEV" shell 'echo up: uid=$(id -u) $(getprop ro.build.version.release) $(uname -m) selinux=$(getenforce)' 2>/dev/null | tr -d '\r'
+}
+qemu_go() {
+  [ -f "$HOME/Android/lineage-arm64/vda.raw" ] || { echo "[qemu] run 'lab qemu provision' first"; exit 1; }
+  qemu_up; echo "[qemu] waiting for boot (first cold boot ~4 min)..."
+  adb connect "$QDEV" >/dev/null 2>&1
+  for _ in $(seq 1 90); do
+    [ "$(timeout 6 adb -s "$QDEV" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = 1 ] && break
+    pgrep -f 'qemu-system-aarch64.*declaw-lineage' >/dev/null || { echo "[qemu] boot failed, see /tmp/declaw-qemu.log"; exit 1; }
+    sleep 8; adb connect "$QDEV" >/dev/null 2>&1
+  done
+  "$HERE/adb-root.sh" >/dev/null 2>&1 || echo "[qemu] warning: root not confirmed"
+  ui "$QDEV" qemu
+  echo "[qemu] root shell. device + window stay up on exit ('lab qemu down' to stop)."
+  exec adb -s "$QDEV" shell
 }
 
 # ---------------------------------------------------------------- avd (x86_64)
@@ -77,20 +96,58 @@ avd_status() {
   local S; S="$(avd_serial)"; [ -n "$S" ] || { echo "[avd] no emulator"; return; }
   adb -s "$S" shell 'echo up: uid=$(id -u) $(getprop ro.build.version.release) $(getprop ro.product.cpu.abi) selinux=$(getenforce)' 2>/dev/null | tr -d '\r'
 }
+avd_go() {
+  emulator -list-avds 2>/dev/null | grep -qx "$AVD_NAME" || { echo "[avd] run 'lab avd provision' first"; exit 1; }
+  avd_up; local S; echo "[avd] waiting for boot..."
+  for _ in $(seq 1 50); do
+    S="$(avd_serial)"; [ -n "$S" ] && [ "$(timeout 6 adb -s "$S" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = 1 ] && break
+    pgrep -f 'qemu-system-x86_64' >/dev/null || { echo "[avd] boot failed, see /tmp/declaw-avd.log"; exit 1; }
+    sleep 6
+  done
+  avd_root >/dev/null 2>&1 || echo "[avd] warning: root not confirmed"
+  ui "$(avd_serial)" avd
+  echo "[avd] root shell. device + window stay up on exit ('lab avd down' to stop)."
+  exec adb -s "$(avd_serial)" shell
+}
+
+# ---------------------------------------------------------------- UI (scrcpy)
+# scrcpy mirrors + controls any adb device, so one UI works for both backends
+# regardless of the qemu display being headless (it captures Android display 0).
+SCRCPY_VER=v4.0
+SCRCPY_DIR="$HERE/../bin/scrcpy-linux-x86_64-${SCRCPY_VER}"
+SCRCPY_URL="https://github.com/Genymobile/scrcpy/releases/download/${SCRCPY_VER}/scrcpy-linux-x86_64-${SCRCPY_VER}.tar.gz"
+resolve_scrcpy() {
+  type -P scrcpy 2>/dev/null && return
+  [ -x "$SCRCPY_DIR/scrcpy" ] && { echo "$SCRCPY_DIR/scrcpy"; return; }
+  [ "$(uname -m)" = x86_64 ] || { echo "[ui] install scrcpy (bundled prebuilt is x86_64 only)" >&2; return 1; }
+  mkdir -p "$HERE/../bin"; curl -fsSL "$SCRCPY_URL" -o "$HERE/../bin/scrcpy.tgz" \
+    && tar xzf "$HERE/../bin/scrcpy.tgz" -C "$HERE/../bin" && rm -f "$HERE/../bin/scrcpy.tgz"
+  echo "$SCRCPY_DIR/scrcpy"
+}
+ui() {  # $1 serial  $2 label
+  local s; s="$(resolve_scrcpy)" || exit 1
+  ADB="$(type -P adb)" nohup "$s" -s "$1" --no-audio --window-title="declaw-$2" \
+    --max-size=1024 >/tmp/declaw-scrcpy-$2.log 2>&1 &
+  echo "[ui] scrcpy pid $! -> declaw-$2 window (log /tmp/declaw-scrcpy-$2.log)"
+}
 
 case "$BACKEND:$CMD" in
+  qemu:go)        qemu_go ;;
   qemu:provision) "$HERE/provision.sh" ;;
   qemu:up)        qemu_up ;;
   qemu:root)      "$HERE/adb-root.sh" ;;
   qemu:shell)     adb connect "$QDEV" >/dev/null 2>&1; exec adb -s "$QDEV" shell "$@" ;;
   qemu:ca)        "$HERE/install-ca.sh" "$QDEV" "$@" ;;
+  qemu:ui)        adb connect "$QDEV" >/dev/null 2>&1; ui "$QDEV" qemu ;;
   qemu:status)    qemu_status ;;
   qemu:down)      qemu_down ;;
+  avd:go)         avd_go ;;
   avd:provision)  avd_provision ;;
   avd:up)         avd_up ;;
   avd:root)       avd_root ;;
   avd:shell)      exec adb -s "$(avd_serial)" shell "$@" ;;
   avd:ca)         "$HERE/install-ca.sh" "$(avd_serial)" "$@" ;;
+  avd:ui)         ui "$(avd_serial)" avd ;;
   avd:status)     avd_status ;;
   avd:down)       avd_down ;;
   *) echo "unknown: $BACKEND $CMD"; usage 1 ;;
