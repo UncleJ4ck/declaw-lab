@@ -15,10 +15,11 @@
 #   up          boot headless
 #   root        get a root adb shell (uid 0)
 #   shell       adb shell
-#   ui          open an interactive window (scrcpy: click, type, drive the app)
-#   ca [pem]    install a CA (default: mitmproxy) so TLS decrypts
+#   ui          open an interactive window (scrcpy)
+#   capture [X] decrypt HTTPS. X = an .apk to install first, a package to scope, or
+#               nothing for all apps. Starts the MITM, redirects 443, follows the log.
 #   status      show state
-#   down        stop
+#   down        stop (also stops the MITM)
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SDK="${ANDROID_SDK_ROOT:-$HOME/Android/sdk}"
@@ -47,9 +48,10 @@ qemu_up() {
   echo "[qemu] booting (headless, ~4 min first time). tail /tmp/declaw-qemu.log"
 }
 qemu_down() {
+  mitm_stop
   local mon="$QRUN/mon.sock"
   [ -S "$mon" ] && echo quit | socat - "UNIX-CONNECT:$mon" >/dev/null 2>&1 || true
-  sleep 2; pgrep -f 'qemu-system-aarch64.*declaw-lineage' >/dev/null && echo "[qemu] still up" || echo "[qemu] down"
+  sleep 2; pgrep -f 'qemu-system-aarch64.*declaw-lineage' >/dev/null && echo "[qemu] still up" || echo "[qemu] down (MITM stopped, guest redirect gone with the VM)"
 }
 qemu_status() {
   pgrep -f 'qemu-system-aarch64.*declaw-lineage' >/dev/null && echo "[qemu] running" || { echo "[qemu] stopped"; return; }
@@ -91,7 +93,7 @@ avd_root() {
   adb -s "$S" remount >/dev/null 2>&1 || { adb -s "$S" disable-verity >/dev/null 2>&1; adb -s "$S" reboot; adb -s "$S" wait-for-device; adb -s "$S" root >/dev/null 2>&1; sleep 2; adb -s "$S" remount >/dev/null 2>&1; }
   adb -s "$S" shell id 2>&1 | tr -d '\r'
 }
-avd_down() { local S; S="$(avd_serial)"; [ -n "$S" ] && adb -s "$S" emu kill >/dev/null 2>&1 || true; echo "[avd] stopped"; }
+avd_down() { mitm_stop; local S; S="$(avd_serial)"; [ -n "$S" ] && adb -s "$S" emu kill >/dev/null 2>&1 || true; echo "[avd] stopped"; }
 avd_status() {
   local S; S="$(avd_serial)"; [ -n "$S" ] || { echo "[avd] no emulator"; return; }
   adb -s "$S" shell 'echo up: uid=$(id -u) $(getprop ro.build.version.release) $(getprop ro.product.cpu.abi) selinux=$(getenforce)' 2>/dev/null | tr -d '\r'
@@ -131,22 +133,66 @@ ui() {  # $1 serial  $2 label
   echo "[ui] scrcpy pid $! -> declaw-$2 window (log /tmp/declaw-scrcpy-$2.log)"
 }
 
+# --------------------------------------------------- install + capture (both)
+# Both backends are on qemu user-net, so the host is 10.0.2.2 from the guest, and
+# both are rooted. A declaw-patched (or mempatched) app accepts any cert, so a
+# throwaway-cert host MITM terminates its TLS and reads the plaintext. We uid-scope
+# an iptables DNAT of that app's 443 to the host MITM. Decrypted flows go to Burp
+# (127.0.0.1:8080) if up, and always to capture/traffic.log.
+GW=10.0.2.2; MITMP="${MITM_PORT:-8083}"
+TRAFFIC_LOG_FILE="$HERE/../capture/traffic.log"
+mitm_start() {
+  pgrep -f 'mitm/mitm_fwd.py' >/dev/null && return
+  command -v python3 >/dev/null || { echo "[mitm] need python3"; exit 1; }
+  mkdir -p "$(dirname "$TRAFFIC_LOG_FILE")"
+  MITM_BIND=0.0.0.0 MITM_PORT="$MITMP" TRAFFIC_LOG="$TRAFFIC_LOG_FILE" \
+    nohup python3 "$HERE/mitm/mitm_fwd.py" >/tmp/declaw-mitm.log 2>&1 &
+  sleep 1
+}
+app_uid() { adb -s "$1" shell "pm list packages -U $2" 2>/dev/null | tr -d '\r' | sed -n 's/.*uid://p' | head -1; }
+# capture [apk|pkg]: the one decrypt command. With an .apk (or split dir) it installs it
+# first; with a package it scopes to that app; with nothing it redirects all HTTPS. Then
+# it points the app's 443 at the host MITM and follows the decrypted log (Ctrl-C to stop
+# watching; the redirect stays until `down`). Decrypted flows also go to Burp if it is up.
+do_capture() {
+  adb connect "$1" >/dev/null 2>&1
+  adb -s "$1" shell id -u 2>/dev/null | grep -q '^0' || { echo "[capture] need root (lab $BACKEND root)"; exit 1; }
+  adb -s "$1" shell "iptables -t nat -L OUTPUT -n" >/dev/null 2>&1 || { echo "[capture] guest has no nat table"; exit 1; }
+  local arg="${2:-}" own="" who="all apps"
+  if [ -n "$arg" ] && [ -e "$arg" ]; then
+    echo "[capture] installing $arg"
+    if [ -d "$arg" ]; then adb -s "$1" install-multiple -r "$arg"/*.apk; else adb -s "$1" install -r "$arg"; fi
+    arg=""
+  fi
+  if [ -n "$arg" ]; then local uid; uid="$(app_uid "$1" "$arg")"; [ -n "$uid" ] || { echo "[capture] $arg not installed"; exit 1; }; own="-m owner --uid-owner $uid"; who="$arg (uid $uid)"; fi
+  mitm_start
+  adb -s "$1" shell "
+    sysctl -w net.ipv4.conf.all.route_localnet=1 >/dev/null 2>&1
+    iptables -t nat -D OUTPUT -p tcp --dport 443 $own -j DNAT --to-destination $GW:$MITMP 2>/dev/null
+    iptables -t nat -A OUTPUT -p tcp --dport 443 $own -j DNAT --to-destination $GW:$MITMP
+    iptables -t nat -C POSTROUTING -p tcp -d $GW --dport $MITMP -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -p tcp -d $GW --dport $MITMP -j MASQUERADE
+  "
+  echo "[capture] $who HTTPS -> host MITM. Burp 127.0.0.1:8080 if up. Following (Ctrl-C to stop):"
+  exec tail -n +1 -f "$TRAFFIC_LOG_FILE"
+}
+mitm_stop() { pkill -f 'avd/mitm/mitm_fwd.py' 2>/dev/null || true; }
+
 case "$BACKEND:$CMD" in
   qemu:go)        qemu_go ;;
+  qemu:capture)   do_capture "$QDEV" "${1:-}" ;;
   qemu:provision) "$HERE/provision.sh" ;;
   qemu:up)        qemu_up ;;
   qemu:root)      "$HERE/adb-root.sh" ;;
   qemu:shell)     adb connect "$QDEV" >/dev/null 2>&1; exec adb -s "$QDEV" shell "$@" ;;
-  qemu:ca)        "$HERE/install-ca.sh" "$QDEV" "$@" ;;
   qemu:ui)        adb connect "$QDEV" >/dev/null 2>&1; ui "$QDEV" qemu ;;
   qemu:status)    qemu_status ;;
   qemu:down)      qemu_down ;;
   avd:go)         avd_go ;;
+  avd:capture)    do_capture "$(avd_serial)" "${1:-}" ;;
   avd:provision)  avd_provision ;;
   avd:up)         avd_up ;;
   avd:root)       avd_root ;;
   avd:shell)      exec adb -s "$(avd_serial)" shell "$@" ;;
-  avd:ca)         "$HERE/install-ca.sh" "$(avd_serial)" "$@" ;;
   avd:ui)         ui "$(avd_serial)" avd ;;
   avd:status)     avd_status ;;
   avd:down)       avd_down ;;

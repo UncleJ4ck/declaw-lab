@@ -40,19 +40,32 @@ interactive window, and drops you in a root shell:
 ```
 
 The device and window stay up when you leave the shell; `./lab <backend> down` stops it.
-Every backend also takes explicit verbs: `provision up root shell ui ca status down`.
+
+Decrypt an app's HTTPS with one command:
+
+```bash
+./lab qemu capture ~/app-patched.apk   # install it, redirect 443, follow the plaintext
+./lab qemu capture                     # or: redirect everything already on the device
+```
+
+`capture` points the app's TLS at a host MITM. declaw-patched (or mempatched) apps accept
+any cert, so the MITM reads the plaintext, logs it, and forwards it into Burp if Burp is up
+(127.0.0.1:8080). Unpatched apps reject the cert, which is the point: declaw is what makes
+them accept it.
 
 ## Commands
 
 ```
+(none)      boot (if needed) + root + UI window + root shell   [the default]
 provision   one-time: fetch + prepare a rooted-ready image
 up          boot headless
 root        root adb shell (uid 0)
 shell       adb shell
-ui          interactive window (scrcpy: click, type, drive the app)
-ca [pem]    install a CA (default mitmproxy) so TLS decrypts
+ui          interactive window (scrcpy)
+capture [X] decrypt HTTPS. X = an .apk to install first, a package to scope, or nothing
+            for all apps. Starts the MITM, redirects 443, follows the log.
 status      uid / android version / arch / selinux
-down        stop
+down        stop (also stops the MITM)
 ```
 
 ## What you bring

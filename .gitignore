@@ -6,3 +6,7 @@ data/
 apks/*.apk
 apks/*/
 !apks/.gitkeep
+
+# MITM runtime artifacts
+avd/mitm/*.pem
+capture/traffic.log
