@@ -96,42 +96,97 @@ fi
 
 has_arm64=0
 has_arm32=0
-declare -a filename_abis=()
+has_x86_64=0
+has_x86=0
+declare -a apk_abi_sets=()
+declare -a apk_abi_counts=()
 for apk in "${apks[@]}"; do
   unzip -tqq "$apk" >/dev/null 2>&1 || fail_input "malformed APK: $apk"
   name=${apk##*/}
   lower_name=${name,,}
-  filename_abi=
+  file_abis=()
+
+  add_file_abi() {
+    local candidate=$1 present
+    for present in "${file_abis[@]}"; do
+      [[ $present != "$candidate" ]] || return 0
+    done
+    file_abis+=("$candidate")
+    case $candidate in
+      arm64-v8a) has_arm64=1 ;;
+      armeabi-v7a) has_arm32=1 ;;
+      x86_64) has_x86_64=1 ;;
+      x86) has_x86=1 ;;
+    esac
+  }
+
   case $lower_name in
     *arm64_v8a*|*arm64-v8a*)
-      filename_abi=arm64-v8a
-      has_arm64=1
+      add_file_abi arm64-v8a
       ;;
     *armeabi_v7a*|*armeabi-v7a*)
-      filename_abi=armeabi-v7a
-      has_arm32=1
+      add_file_abi armeabi-v7a
+      ;;
+    *x86_64*|*x86-64*)
+      add_file_abi x86_64
+      ;;
+    *x86*)
+      add_file_abi x86
       ;;
   esac
-  filename_abis+=("$filename_abi")
 
   while IFS= read -r entry; do
     case $entry in
-      lib/arm64-v8a/*) has_arm64=1 ;;
-      lib/armeabi-v7a/*) has_arm32=1 ;;
+      lib/arm64-v8a/*) add_file_abi arm64-v8a ;;
+      lib/armeabi-v7a/*) add_file_abi armeabi-v7a ;;
+      lib/x86_64/*) add_file_abi x86_64 ;;
+      lib/x86/*) add_file_abi x86 ;;
     esac
   done < <(unzip -Z1 "$apk")
+  apk_abi_sets+=(" ${file_abis[*]} ")
+  apk_abi_counts+=("${#file_abis[@]}")
 done
 
 if ((has_arm64 && has_arm32)) && [[ -z $abi ]]; then
   fail_input "bundle contains both ARM ABIs; select one with --abi arm64-v8a or --abi armeabi-v7a"
 fi
 
+native_present=$((has_arm64 || has_arm32 || has_x86_64 || has_x86))
+effective_abi=$abi
+if [[ -n $abi ]]; then
+  requested_present=0
+  if [[ $abi == arm64-v8a ]]; then
+    requested_present=$has_arm64
+  else
+    requested_present=$has_arm32
+  fi
+  if ((native_present && ! requested_present)); then
+    fail_input "requested ABI $abi is not present in the native APK set"
+  fi
+elif ((has_arm64)); then
+  effective_abi=arm64-v8a
+elif ((has_arm32)); then
+  effective_abi=armeabi-v7a
+elif ((native_present)); then
+  fail_input "native APK set contains no supported ARM ABI"
+fi
+
 declare -a selected=()
 for index in "${!apks[@]}"; do
-  if [[ -n $abi && -n ${filename_abis[index]} && ${filename_abis[index]} != "$abi" ]]; then
+  name=${apks[index]##*/}
+  lower_name=${name,,}
+  abi_count=${apk_abi_counts[index]}
+  abi_set=${apk_abi_sets[index]}
+
+  # No-ABI resource splits, the required base, and fat/universal APKs are
+  # architecture-neutral install inputs. Filter only single-ABI native splits.
+  if ((abi_count == 0 || abi_count > 1)) || [[ $lower_name == base.apk ]]; then
+    selected+=("${apks[index]}")
     continue
   fi
-  selected+=("${apks[index]}")
+  if [[ -n $effective_abi && $abi_set == *" $effective_abi "* ]]; then
+    selected+=("${apks[index]}")
+  fi
 done
 
 ((${#selected[@]} > 0)) || fail_input "no APK files remain after ABI filtering"

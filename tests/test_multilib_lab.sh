@@ -173,6 +173,7 @@ test_installer() {
   mkdir "$tmp/instagram-source"
   make_apk "$tmp/instagram-source/base.apk" lib/armeabi-v7a/libinstagram.so
   make_apk "$tmp/instagram-source/split_config.xhdpi.apk"
+  make_apk "$tmp/instagram-source/split_config.x86_64.apk"
   printf '{"name":"Instagram"}\n' >"$tmp/instagram-source/info.json"
   make_bundle "$tmp/instagram.apkm" "$tmp/instagram-source"
   PATH="$FAKES:$PATH" FAKE_ADB_PROFILE=installer \
@@ -198,11 +199,20 @@ test_installer() {
   : >"$install_log"
   mkdir "$tmp/mixed-source"
   make_apk "$tmp/mixed-source/base.apk"
+  make_apk "$tmp/mixed-source/neutral-arm64.apk" \
+    lib/arm64-v8a/libneutral.so
+  make_apk "$tmp/mixed-source/neutral-arm32.apk" \
+    lib/armeabi-v7a/libneutral.so
   make_apk "$tmp/mixed-source/split_config.arm64_v8a.apk" \
     lib/arm64-v8a/libfixture.so
   make_apk "$tmp/mixed-source/split_config.armeabi_v7a.apk" \
     lib/armeabi-v7a/libfixture.so
   make_apk "$tmp/mixed-source/split_config.en.apk"
+  make_apk "$tmp/mixed-source/split_config.x86.apk"
+  make_apk "$tmp/mixed-source/split_config.x86_64.apk" \
+    lib/x86_64/libfixture.so
+  make_apk "$tmp/mixed-source/universal-native.apk" \
+    lib/arm64-v8a/libuniversal.so lib/armeabi-v7a/libuniversal.so
   printf 'metadata\n' >"$tmp/mixed-source/manifest.json"
   make_bundle "$tmp/mixed.apkm" "$tmp/mixed-source"
 
@@ -220,12 +230,24 @@ test_installer() {
     "$ROOT/avd/install-app.sh" test-serial --abi armeabi-v7a \
     "$tmp/mixed.apkm" >/dev/null
   assert_line "$(<"$install_log")" \
-    $'install-multiple\tbase.apk\tsplit_config.armeabi_v7a.apk\tsplit_config.en.apk'
+    $'install-multiple\tbase.apk\tneutral-arm32.apk\tsplit_config.armeabi_v7a.apk\tsplit_config.en.apk\tuniversal-native.apk'
   grep -Fq -- "install-multiple -r --abi armeabi-v7a" "$argv_log" || \
     fail "split APK install did not forward --abi armeabi-v7a to adb"
-  if grep -Fq arm64_v8a "$install_log"; then
-    fail "arm64 ABI split survived armeabi-v7a filtering"
+  if grep -Eq 'arm64|x86' "$install_log"; then
+    fail "non-selected ARM/x86 ABI split survived armeabi-v7a filtering"
   fi
+
+  set +e
+  output=$(PATH="$FAKES:$PATH" FAKE_ADB_PROFILE=installer \
+    "$ROOT/avd/install-app.sh" test-serial --abi armeabi-v7a \
+    "$tmp/X bundle" 2>&1)
+  status=$?
+  set -e
+  [[ $status -eq 2 ]] || fail "absent requested ABI returned $status, expected 2"
+  grep -Fq -- "armeabi-v7a" <<<"$output" || \
+    fail "absent requested ABI error omitted the requested ABI"
+  grep -Fq -- "not present" <<<"$output" || \
+    fail "absent requested ABI error was not explicit"
 
   mkdir "$tmp/empty-dir"
   printf 'not a zip\n' >"$tmp/malformed.apkm"
