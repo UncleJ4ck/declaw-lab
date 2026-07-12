@@ -14,6 +14,14 @@ if [[ -n ${FAKE_ADB_LOG:-} ]]; then
   printf '%s\n' "-s $serial $*" >>"$FAKE_ADB_LOG"
 fi
 
+if [[ -n ${FAKE_ADB_ARGV_LOG:-} ]]; then
+  {
+    printf '%q ' -s "$serial"
+    printf '%q ' "$@"
+    printf '\n'
+  } >>"$FAKE_ADB_ARGV_LOG"
+fi
+
 if [[ $profile == unreachable ]]; then
   echo "error: device '$serial' not found" >&2
   exit 1
@@ -34,6 +42,45 @@ if [[ $command == shell ]]; then
 fi
 
 case "$command" in
+  install|install-multiple)
+    shift
+    [[ ${1:-} == -r ]] || {
+      echo "fake adb: installer omitted -r" >&2
+      exit 94
+    }
+    shift
+    if [[ ${1:-} == --abi ]]; then
+      [[ -n ${2:-} ]] || {
+        echo "fake adb: --abi omitted its value" >&2
+        exit 94
+      }
+      shift 2
+    fi
+    (($# > 0)) || {
+      echo "fake adb: installer passed no APKs" >&2
+      exit 94
+    }
+    if [[ -n ${FAKE_ADB_INSTALL_LOG:-} ]]; then
+      {
+        printf '%s' "$command"
+        for apk in "$@"; do
+          printf '\t%s' "$(basename "$apk")"
+        done
+        printf '\n'
+      } >>"$FAKE_ADB_INSTALL_LOG"
+    fi
+    for apk in "$@"; do
+      [[ -f $apk && $apk == *.apk ]] || {
+        echo "fake adb: invalid APK argument: $apk" >&2
+        exit 93
+      }
+    done
+    if [[ ${FAKE_ADB_FAIL_INSTALL:-0} == 1 ]]; then
+      echo "Failure [INSTALL_FAILED_TEST]" >&2
+      exit 42
+    fi
+    echo Success
+    ;;
   get-state)
     echo device
     ;;

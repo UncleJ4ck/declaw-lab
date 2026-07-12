@@ -14,6 +14,50 @@ assert_line() {
   grep -Fqx -- "$expected" <<<"$output" || fail "missing exact line: $expected"
 }
 
+assert_status() {
+  local expected=$1
+  shift
+  local status
+  set +e
+  "$@" >/dev/null 2>&1
+  status=$?
+  set -e
+  [[ $status -eq $expected ]] || fail "command returned $status, expected $expected: $*"
+}
+
+make_apk() {
+  local output=$1
+  shift
+  python3 - "$output" "$@" <<'PY'
+import pathlib
+import sys
+import zipfile
+
+output = pathlib.Path(sys.argv[1])
+output.parent.mkdir(parents=True, exist_ok=True)
+with zipfile.ZipFile(output, "w") as archive:
+    archive.writestr("AndroidManifest.xml", b"manifest")
+    for entry in sys.argv[2:]:
+        archive.writestr(entry, b"fixture")
+PY
+}
+
+make_bundle() {
+  local output=$1 source=$2
+  python3 - "$output" "$source" <<'PY'
+import pathlib
+import sys
+import zipfile
+
+output = pathlib.Path(sys.argv[1])
+source = pathlib.Path(sys.argv[2])
+with zipfile.ZipFile(output, "w") as archive:
+    for path in sorted(source.rglob("*")):
+        if path.is_file():
+            archive.write(path, path.relative_to(source))
+PY
+}
+
 run_checker_profile() {
   local profile=$1 expected_status=$2 adb_timeout=${3:-1} output status
   set +e
@@ -88,8 +132,126 @@ test_checker() {
   echo "PASS: checker"
 }
 
+test_installer() {
+  local tmp install_log argv_log output status
+  tmp=$(mktemp -d)
+  install_log="$tmp/install.log"
+  argv_log="$tmp/argv.log"
+  trap 'rm -rf "$tmp"' RETURN
+
+  make_apk "$tmp/demo.apk"
+  PATH="$FAKES:$PATH" FAKE_ADB_PROFILE=installer \
+    FAKE_ADB_INSTALL_LOG="$install_log" FAKE_ADB_ARGV_LOG="$argv_log" \
+    "$ROOT/avd/install-app.sh" test-serial "$tmp/demo.apk" >/dev/null
+  assert_line "$(<"$install_log")" $'install\tdemo.apk'
+  grep -Fq -- "$(printf '%q' "$tmp/demo.apk")" "$argv_log" || \
+    fail "single APK path was not preserved as one adb argument"
+
+  : >"$install_log"
+  : >"$argv_log"
+  PATH="$FAKES:$PATH" FAKE_ADB_PROFILE=installer \
+    FAKE_ADB_INSTALL_LOG="$install_log" FAKE_ADB_ARGV_LOG="$argv_log" \
+    "$ROOT/avd/install-app.sh" test-serial --abi arm64-v8a \
+    "$tmp/demo.apk" >/dev/null
+  grep -Fq -- "install -r --abi arm64-v8a" "$argv_log" || \
+    fail "single APK install did not forward --abi arm64-v8a to adb"
+
+  : >"$install_log"
+  mkdir "$tmp/X bundle"
+  make_apk "$tmp/X bundle/base.apk"
+  make_apk "$tmp/X bundle/feature with spaces.apk"
+  make_apk "$tmp/X bundle/split_config.arm64_v8a.apk" \
+    lib/arm64-v8a/libfixture.so
+  printf 'not an apk\n' >"$tmp/X bundle/read me.txt"
+  PATH="$FAKES:$PATH" FAKE_ADB_PROFILE=installer \
+    FAKE_ADB_INSTALL_LOG="$install_log" \
+    "$ROOT/avd/install-app.sh" test-serial "$tmp/X bundle" >/dev/null
+  assert_line "$(<"$install_log")" \
+    $'install-multiple\tbase.apk\tfeature with spaces.apk\tsplit_config.arm64_v8a.apk'
+
+  : >"$install_log"
+  mkdir "$tmp/instagram-source"
+  make_apk "$tmp/instagram-source/base.apk" lib/armeabi-v7a/libinstagram.so
+  make_apk "$tmp/instagram-source/split_config.xhdpi.apk"
+  printf '{"name":"Instagram"}\n' >"$tmp/instagram-source/info.json"
+  make_bundle "$tmp/instagram.apkm" "$tmp/instagram-source"
+  PATH="$FAKES:$PATH" FAKE_ADB_PROFILE=installer \
+    FAKE_ADB_INSTALL_LOG="$install_log" \
+    "$ROOT/avd/install-app.sh" test-serial "$tmp/instagram.apkm" >/dev/null
+  assert_line "$(<"$install_log")" \
+    $'install-multiple\tbase.apk\tsplit_config.xhdpi.apk'
+
+  : >"$install_log"
+  mkdir "$tmp/whatsapp-source"
+  make_apk "$tmp/whatsapp-source/com.whatsapp.apk" \
+    lib/armeabi-v7a/libwhatsapp.so
+  make_apk "$tmp/whatsapp-source/config.armeabi_v7a.apk" \
+    lib/armeabi-v7a/libfixture.so
+  printf '{"xapk_version":2}\n' >"$tmp/whatsapp-source/manifest.json"
+  make_bundle "$tmp/whatsapp.xapk" "$tmp/whatsapp-source"
+  PATH="$FAKES:$PATH" FAKE_ADB_PROFILE=installer \
+    FAKE_ADB_INSTALL_LOG="$install_log" \
+    "$ROOT/avd/install-app.sh" test-serial "$tmp/whatsapp.xapk" >/dev/null
+  assert_line "$(<"$install_log")" \
+    $'install-multiple\tcom.whatsapp.apk\tconfig.armeabi_v7a.apk'
+
+  : >"$install_log"
+  mkdir "$tmp/mixed-source"
+  make_apk "$tmp/mixed-source/base.apk"
+  make_apk "$tmp/mixed-source/split_config.arm64_v8a.apk" \
+    lib/arm64-v8a/libfixture.so
+  make_apk "$tmp/mixed-source/split_config.armeabi_v7a.apk" \
+    lib/armeabi-v7a/libfixture.so
+  make_apk "$tmp/mixed-source/split_config.en.apk"
+  printf 'metadata\n' >"$tmp/mixed-source/manifest.json"
+  make_bundle "$tmp/mixed.apkm" "$tmp/mixed-source"
+
+  set +e
+  output=$(PATH="$FAKES:$PATH" FAKE_ADB_PROFILE=installer \
+    "$ROOT/avd/install-app.sh" test-serial "$tmp/mixed.apkm" 2>&1)
+  status=$?
+  set -e
+  [[ $status -ne 0 ]] || fail "mixed ARM bundle installed without --abi"
+  grep -Fq -- "--abi" <<<"$output" || fail "mixed ARM rejection omitted --abi guidance"
+
+  : >"$argv_log"
+  PATH="$FAKES:$PATH" FAKE_ADB_PROFILE=installer \
+    FAKE_ADB_INSTALL_LOG="$install_log" FAKE_ADB_ARGV_LOG="$argv_log" \
+    "$ROOT/avd/install-app.sh" test-serial --abi armeabi-v7a \
+    "$tmp/mixed.apkm" >/dev/null
+  assert_line "$(<"$install_log")" \
+    $'install-multiple\tbase.apk\tsplit_config.armeabi_v7a.apk\tsplit_config.en.apk'
+  grep -Fq -- "install-multiple -r --abi armeabi-v7a" "$argv_log" || \
+    fail "split APK install did not forward --abi armeabi-v7a to adb"
+  if grep -Fq arm64_v8a "$install_log"; then
+    fail "arm64 ABI split survived armeabi-v7a filtering"
+  fi
+
+  mkdir "$tmp/empty-dir"
+  printf 'not a zip\n' >"$tmp/malformed.apkm"
+  mkdir "$tmp/empty-source"
+  printf 'metadata\n' >"$tmp/empty-source/info.json"
+  make_bundle "$tmp/empty.apkm" "$tmp/empty-source"
+  assert_status 2 "$ROOT/avd/install-app.sh"
+  assert_status 2 "$ROOT/avd/install-app.sh" test-serial "$tmp/empty-dir"
+  assert_status 2 "$ROOT/avd/install-app.sh" test-serial "$tmp/malformed.apkm"
+  assert_status 2 "$ROOT/avd/install-app.sh" test-serial "$tmp/empty.apkm"
+  assert_status 2 "$ROOT/avd/install-app.sh" test-serial --abi x86 "$tmp/demo.apk"
+  assert_status 2 "$ROOT/avd/install-app.sh" test-serial "$tmp/does-not-exist.apkm"
+
+  set +e
+  PATH="$FAKES:$PATH" FAKE_ADB_PROFILE=installer FAKE_ADB_FAIL_INSTALL=1 \
+    "$ROOT/avd/install-app.sh" test-serial "$tmp/demo.apk" >/dev/null 2>&1
+  status=$?
+  set -e
+  [[ $status -eq 42 ]] || fail "adb install failure returned $status, expected 42"
+
+  echo "PASS: installer"
+}
+
 case ${1:-all} in
   checker) test_checker ;;
-  all) test_checker ;;
+  installer) test_installer ;;
+  all) test_checker; test_installer ;;
   *) fail "unknown test group: ${1:-}" ;;
 esac
