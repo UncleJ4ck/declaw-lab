@@ -11,7 +11,9 @@
 #   APK | PKG   boot + install (if APK) + send that app's HTTPS to Burp + UI  [pentest one-liner]
 #   capture [X] same as passing X: X = .apk to install, a package to scope, or nothing for
 #               all apps. Decrypts to Burp (127.0.0.1:8080) and capture/traffic.log.
-#   probe P L O confirm L@O is the LIVE ssl_verify_peer_cert in pkg P (BRK; you drive 1 request).
+#   keylog PKG  QUIC/HTTP3 (cronet) is invisible to a MITM: run declaw's friTap key+pcap
+#               capture on this device (SSLKEYLOG + pcap, decrypt in Wireshark).
+#   probe P L O confirm L@O is the LIVE ssl_verify_peer_cert in pkg P (BRK; qemu/arm64 only).
 #   provision   one-time: fetch + prepare a rooted image
 #   up root shell ui   the individual steps, all folded into the default
 #   status | down      show state | stop (also stops the MITM)
@@ -31,7 +33,7 @@ if [ ! -x "${JAVA_HOME:-/nonexistent}/bin/java" ]; then
   done
 fi
 
-usage() { sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 case "${1:-}" in -h|--help|help) usage 0 ;; esac
 # Backend is an optional first arg. Then a known subcommand runs as-is; anything else
 # (a bare apk/dir/package, or nothing) means the default `go`, which captures that target.
@@ -283,9 +285,26 @@ do_probe() {  # $1=dev $2=pkg $3=lib-substr $4=hex-offset
   fi
 }
 
+# keylog: QUIC/HTTP3 (cronet) rides UDP, so a TCP MITM sees nothing. Reuse declaw's friTap
+# key+pcap capture (SSLKEYLOG) against this device rather than reimplementing it.
+do_keylog() {  # $1 serial  $2 pkg
+  local dev="$1" pkg="${2:-}"
+  [ -n "$pkg" ] || { echo "usage: lab <backend> keylog <pkg>"; exit 1; }
+  local DW="${DECLAW:-declaw}"
+  if ! { command -v "$DW" >/dev/null 2>&1 || [ -x "$DW" ]; }; then
+    echo "[keylog] declaw not found. Install it, or set DECLAW=/path/to/the/declaw/cli."
+    echo "[keylog] It extracts TLS keys with friTap for QUIC/cronet a MITM cannot see. Run:"
+    echo "[keylog]   declaw $pkg --mode capture -s $dev"
+    exit 1
+  fi
+  echo "[keylog] declaw friTap key+pcap capture on $pkg (QUIC/cronet-capable, SSLKEYLOG + pcap)..."
+  exec "$DW" "$pkg" --mode capture -s "$dev"
+}
+
 case "$BACKEND:$CMD" in
   qemu:go)        qemu_go "${1:-}" ;;
   qemu:capture)   qemu_ensure; do_capture "$QDEV" "${1:-}" ;;
+  qemu:keylog)    qemu_ensure; do_keylog "$QDEV" "${1:-}" ;;
   qemu:probe)     do_probe "$QDEV" "$@" ;;
   qemu:provision) "$HERE/provision.sh" ;;
   qemu:up)        qemu_up ;;
@@ -296,7 +315,8 @@ case "$BACKEND:$CMD" in
   qemu:down)      qemu_down ;;
   avd:go)         avd_go "${1:-}" ;;
   avd:capture)    avd_ensure; do_capture "$(avd_serial)" "${1:-}" ;;
-  avd:probe)      do_probe "$(avd_serial)" "$@" ;;
+  avd:keylog)     avd_ensure; do_keylog "$(avd_serial)" "${1:-}" ;;
+  avd:probe)      echo "[probe] arm64-only (arm64 BRK bytes + arm64 mempoke); use: lab qemu probe <pkg> <lib> <off>"; exit 2 ;;
   avd:provision)  avd_provision ;;
   avd:up)         avd_up ;;
   avd:root)       avd_root ;;
