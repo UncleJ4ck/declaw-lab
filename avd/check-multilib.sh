@@ -7,29 +7,72 @@ if [[ -z $serial ]]; then
   exit 1
 fi
 
+adb_timeout=${CHECK_ADB_TIMEOUT:-10}
+if [[ ! $adb_timeout =~ ^[0-9]+([.][0-9]+)?[smhd]?$ ]]; then
+  echo "[check] ERROR: invalid CHECK_ADB_TIMEOUT=$adb_timeout" >&2
+  exit 1
+fi
+if ! command -v timeout >/dev/null 2>&1; then
+  echo "[check] ERROR: host timeout command is required" >&2
+  exit 1
+fi
+
 adb_for_device() {
-  adb -s "$serial" "$@"
+  timeout --kill-after=1 "$adb_timeout" adb -s "$serial" "$@"
 }
 
-if ! state=$(adb_for_device get-state 2>/dev/null) || [[ $state != device ]]; then
+state=$(adb_for_device get-state 2>/dev/null)
+status=$?
+if [[ $status -eq 124 || $status -eq 137 ]]; then
+  echo "[check] ERROR: adb command timed out while checking device $serial"
+  exit 1
+fi
+if [[ $status -ne 0 || $state != device ]]; then
   echo "[check] ERROR: adb device $serial is unreachable"
   exit 1
 fi
 
-adb_value() {
-  adb_for_device "$@" 2>/dev/null | tr -d '\r'
+transport_error() {
+  local label=$1 status=$2
+  if [[ $status -eq 124 || $status -eq 137 ]]; then
+    echo "[check] ERROR: adb command timed out while $label"
+  else
+    echo "[check] ERROR: adb command failed while $label"
+  fi
+  exit 1
 }
 
-release=$(adb_value shell getprop ro.build.version.release)
-sdk=$(adb_value shell getprop ro.build.version.sdk)
-kernel=$(adb_value shell uname -m)
-uid=$(adb_value shell id -u)
-selinux=$(adb_value shell getenforce)
-zygote=$(adb_value shell getprop ro.zygote)
-abilist64=$(adb_value shell getprop ro.product.cpu.abilist64)
-abilist32=$(adb_value shell getprop ro.product.cpu.abilist32)
-compat=$(adb_value shell sh -c \
-  "if [ -r /proc/config.gz ]; then gzip -dc /proc/config.gz 2>/dev/null | grep -m1 '^CONFIG_COMPAT='; elif [ -r /proc/config ]; then grep -m1 '^CONFIG_COMPAT=' /proc/config; fi")
+adb_capture() {
+  local result_var=$1 label=$2 output status
+  shift 2
+  output=$(adb_for_device "$@" 2>/dev/null)
+  status=$?
+  [[ $status -eq 0 ]] || transport_error "$label" "$status"
+  output=${output//$'\r'/}
+  printf -v "$result_var" '%s' "$output"
+}
+
+release=''
+sdk=''
+kernel=''
+uid=''
+selinux=''
+zygote=''
+abilist64=''
+abilist32=''
+compat=''
+adb_capture release "reading ro.build.version.release" shell getprop ro.build.version.release
+adb_capture sdk "reading ro.build.version.sdk" shell getprop ro.build.version.sdk
+adb_capture kernel "reading kernel architecture" shell uname -m
+adb_capture uid "reading shell uid" shell id -u
+adb_capture selinux "reading SELinux mode" shell getenforce
+adb_capture zygote "reading ro.zygote" shell getprop ro.zygote
+adb_capture abilist64 "reading ro.product.cpu.abilist64" shell getprop ro.product.cpu.abilist64
+adb_capture abilist32 "reading ro.product.cpu.abilist32" shell getprop ro.product.cpu.abilist32
+# This program is intentionally expanded by the Android guest's shell.
+# shellcheck disable=SC2016
+adb_capture compat "reading CONFIG_COMPAT" shell sh -c \
+  'config=; if [ -r /proc/config.gz ]; then config=$(gzip -dc /proc/config.gz 2>/dev/null | grep -m1 -E "^(CONFIG_COMPAT=|# CONFIG_COMPAT is not set$)" || true); elif [ -r /proc/config ]; then config=$(grep -m1 -E "^(CONFIG_COMPAT=|# CONFIG_COMPAT is not set$)" /proc/config || true); fi; if [ -n "$config" ]; then printf "%s\n" "$config"; else echo "<unreadable>"; fi'
 
 runtime64=(
   /system/bin/app_process64
@@ -47,15 +90,23 @@ has_abi() {
 }
 
 runtime_report() {
-  local result_var=$1 path
+  local result_var=$1 path state
   local report=()
   shift
   for path in "$@"; do
-    if adb_for_device shell test -x "$path" >/dev/null 2>&1; then
+    state=
+    # This program is intentionally expanded by the Android guest's shell.
+    # shellcheck disable=SC2016
+    adb_capture state "checking executable $path" shell sh -c \
+      'if [ -x "$1" ]; then echo executable; else echo missing; fi' sh "$path"
+    if [[ $state == executable ]]; then
       report+=("$path")
-    else
+    elif [[ $state == missing ]]; then
       report+=("<missing:$path>")
       failures+=("missing executable $path")
+    else
+      echo "[check] ERROR: unexpected response while checking executable $path"
+      exit 1
     fi
   done
   local IFS=,
@@ -77,7 +128,24 @@ has_abi "$abilist64" arm64-v8a || failures+=("abilist64=${abilist64:-<empty>} (n
 if ! has_abi "$abilist32" armeabi-v7a || ! has_abi "$abilist32" armeabi; then
   failures+=("abilist32=${abilist32:-<empty>} (need armeabi-v7a,armeabi)")
 fi
-if [[ -n $compat && $compat != CONFIG_COMPAT=y ]]; then
+compat_proof=
+if [[ $compat == "# CONFIG_COMPAT is not set" ]]; then
+  failures+=("CONFIG_COMPAT is disabled (need y)")
+elif [[ $compat == "<unreadable>" || -z $compat ]]; then
+  probe=
+  # This program is intentionally expanded by the Android guest's shell.
+  # shellcheck disable=SC2016
+  adb_capture probe "probing 32-bit runtime execution" shell sh -c \
+    '/apex/com.android.runtime/bin/linker --help >/dev/null 2>&1; printf "status=%s\n" "$?"'
+  if [[ $probe == status=0 ]]; then
+    compat_proof="runtime-probed:/apex/com.android.runtime/bin/linker --help"
+  elif [[ $probe == status=* ]]; then
+    failures+=("CONFIG_COMPAT unavailable and 32-bit runtime probe failed")
+  else
+    echo "[check] ERROR: unexpected response while probing 32-bit runtime execution"
+    exit 1
+  fi
+elif [[ $compat != CONFIG_COMPAT=y ]]; then
   failures+=("CONFIG_COMPAT=${compat#CONFIG_COMPAT=} (need y)")
 fi
 
@@ -88,6 +156,9 @@ echo "[check] abilist32=${abilist32:-<empty>}"
 echo "[check] runtime64=$runtime64_report"
 echo "[check] runtime32=$runtime32_report"
 echo "[check] compat=${compat:-<unreadable>}"
+if [[ -n $compat_proof ]]; then
+  echo "[check] compat-proof=$compat_proof"
+fi
 
 if ((${#failures[@]})); then
   for failure in "${failures[@]}"; do

@@ -15,9 +15,10 @@ assert_line() {
 }
 
 run_checker_profile() {
-  local profile=$1 expected_status=$2 output status
+  local profile=$1 expected_status=$2 adb_timeout=${3:-1} output status
   set +e
   output=$(PATH="$FAKES:$PATH" FAKE_ADB_PROFILE="$profile" \
+    CHECK_ADB_TIMEOUT="$adb_timeout" timeout 2 \
     "$ROOT/avd/check-multilib.sh" test-serial 2>&1)
   status=$?
   set -e
@@ -62,6 +63,24 @@ test_checker() {
 
   output=$(run_checker_profile unreachable 1)
   assert_line "$output" "[check] ERROR: adb device test-serial is unreachable"
+
+  output=$(run_checker_profile disabled-config 2)
+  assert_line "$output" "[check] compat=# CONFIG_COMPAT is not set"
+  assert_line "$output" "[check] FAIL: CONFIG_COMPAT is disabled (need y)"
+
+  output=$(run_checker_profile unreadable-config 0)
+  assert_line "$output" "[check] compat=<unreadable>"
+  assert_line "$output" "[check] compat-proof=runtime-probed:/apex/com.android.runtime/bin/linker --help"
+  assert_line "$output" "[check] PASS: one Android 16 guest runs arm64-v8a and armeabi-v7a apps"
+
+  output=$(run_checker_profile unreadable-no-probe 2)
+  assert_line "$output" "[check] FAIL: CONFIG_COMPAT unavailable and 32-bit runtime probe failed"
+
+  output=$(run_checker_profile collection-failure 1)
+  assert_line "$output" "[check] ERROR: adb command failed while reading ro.build.version.release"
+
+  output=$(run_checker_profile hang 1 0.1)
+  assert_line "$output" "[check] ERROR: adb command timed out while reading ro.build.version.release"
 
   echo "PASS: checker"
 }

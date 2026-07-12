@@ -19,6 +19,14 @@ if [[ $profile == unreachable ]]; then
   exit 1
 fi
 
+if [[ $profile == collection-failure && ${1:-} == shell && ${2:-} == getprop && ${3:-} == ro.build.version.release ]]; then
+  exit 42
+fi
+
+if [[ $profile == hang && ${1:-} != get-state ]]; then
+  sleep 5
+fi
+
 case "${1:-} ${2:-}" in
   "get-state ")
     echo device
@@ -52,7 +60,7 @@ case "${1:-} ${2:-}" in
     [[ ${3:-} == -x ]] || exit 95
     path=${4:-}
     case "$profile:$path" in
-      multilib:/system/bin/app_process64|multilib:/apex/com.android.runtime/bin/linker64|multilib:/system/bin/app_process32|multilib:/apex/com.android.runtime/bin/linker)
+      multilib:/system/bin/app_process64|multilib:/apex/com.android.runtime/bin/linker64|multilib:/system/bin/app_process32|multilib:/apex/com.android.runtime/bin/linker|disabled-config:/system/bin/app_process64|disabled-config:/apex/com.android.runtime/bin/linker64|disabled-config:/system/bin/app_process32|disabled-config:/apex/com.android.runtime/bin/linker|unreadable-config:/system/bin/app_process64|unreadable-config:/apex/com.android.runtime/bin/linker64|unreadable-config:/system/bin/app_process32|unreadable-config:/apex/com.android.runtime/bin/linker|unreadable-no-probe:/system/bin/app_process64|unreadable-no-probe:/apex/com.android.runtime/bin/linker64|unreadable-no-probe:/system/bin/app_process32|unreadable-no-probe:/apex/com.android.runtime/bin/linker)
         exit 0
         ;;
       arm64only:/system/bin/app_process64|arm64only:/apex/com.android.runtime/bin/linker64)
@@ -63,7 +71,28 @@ case "${1:-} ${2:-}" in
     ;;
   "shell sh")
     if [[ ${3:-} == -c && ${4:-} == *CONFIG_COMPAT* ]]; then
-      echo CONFIG_COMPAT=y
+      case $profile in
+        disabled-config) echo "# CONFIG_COMPAT is not set" ;;
+        unreadable-config|unreadable-no-probe) echo "<unreadable>" ;;
+        *) echo CONFIG_COMPAT=y ;;
+      esac
+    elif [[ ${3:-} == -c && ${4:-} == *linker*--help* ]]; then
+      if [[ $profile == unreadable-no-probe ]]; then
+        echo status=1
+      else
+        echo status=0
+      fi
+    elif [[ ${3:-} == -c && ${4:-} == *"[ -x"* ]]; then
+      path=${6:-}
+      case "$profile:$path" in
+        multilib:/system/bin/app_process64|multilib:/apex/com.android.runtime/bin/linker64|multilib:/system/bin/app_process32|multilib:/apex/com.android.runtime/bin/linker|disabled-config:/system/bin/app_process64|disabled-config:/apex/com.android.runtime/bin/linker64|disabled-config:/system/bin/app_process32|disabled-config:/apex/com.android.runtime/bin/linker|unreadable-config:/system/bin/app_process64|unreadable-config:/apex/com.android.runtime/bin/linker64|unreadable-config:/system/bin/app_process32|unreadable-config:/apex/com.android.runtime/bin/linker|unreadable-no-probe:/system/bin/app_process64|unreadable-no-probe:/apex/com.android.runtime/bin/linker64|unreadable-no-probe:/system/bin/app_process32|unreadable-no-probe:/apex/com.android.runtime/bin/linker)
+          echo executable
+          ;;
+        arm64only:/system/bin/app_process64|arm64only:/apex/com.android.runtime/bin/linker64)
+          echo executable
+          ;;
+        *) echo missing ;;
+      esac
     else
       exit 95
     fi
