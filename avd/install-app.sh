@@ -99,7 +99,6 @@ has_arm32=0
 has_x86_64=0
 has_x86=0
 declare -a apk_abi_sets=()
-declare -a apk_abi_counts=()
 for apk in "${apks[@]}"; do
   unzip -tqq "$apk" >/dev/null 2>&1 || fail_input "malformed APK: $apk"
   name=${apk##*/}
@@ -144,7 +143,6 @@ for apk in "${apks[@]}"; do
     esac
   done < <(unzip -Z1 "$apk")
   apk_abi_sets+=(" ${file_abis[*]} ")
-  apk_abi_counts+=("${#file_abis[@]}")
 done
 
 if ((has_arm64 && has_arm32)) && [[ -z $abi ]]; then
@@ -175,17 +173,18 @@ declare -a selected=()
 for index in "${!apks[@]}"; do
   name=${apks[index]##*/}
   lower_name=${name,,}
-  abi_count=${apk_abi_counts[index]}
   abi_set=${apk_abi_sets[index]}
 
-  # No-ABI resource splits, the required base, and fat/universal APKs are
-  # architecture-neutral install inputs. Filter only single-ABI native splits.
-  if ((abi_count == 0 || abi_count > 1)) || [[ $lower_name == base.apk ]]; then
+  # Resource/noarch splits are architecture-neutral. Native APKs, including
+  # multi-ABI features, are usable only when they contain the selected target.
+  if [[ $abi_set == "  " ]]; then
     selected+=("${apks[index]}")
     continue
   fi
   if [[ -n $effective_abi && $abi_set == *" $effective_abi "* ]]; then
     selected+=("${apks[index]}")
+  elif [[ $lower_name == base.apk ]]; then
+    fail_input "base.apk is incompatible with target ABI $effective_abi (contains:${abi_set})"
   fi
 done
 

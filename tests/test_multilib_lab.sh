@@ -203,6 +203,8 @@ test_installer() {
     lib/arm64-v8a/libneutral.so
   make_apk "$tmp/mixed-source/neutral-arm32.apk" \
     lib/armeabi-v7a/libneutral.so
+  make_apk "$tmp/mixed-source/foreign-multi.apk" \
+    lib/arm64-v8a/libforeign.so lib/x86_64/libforeign.so
   make_apk "$tmp/mixed-source/split_config.arm64_v8a.apk" \
     lib/arm64-v8a/libfixture.so
   make_apk "$tmp/mixed-source/split_config.armeabi_v7a.apk" \
@@ -236,6 +238,27 @@ test_installer() {
   if grep -Eq 'arm64|x86' "$install_log"; then
     fail "non-selected ARM/x86 ABI split survived armeabi-v7a filtering"
   fi
+  if grep -Fq foreign-multi.apk "$install_log"; then
+    fail "foreign multi-ABI feature survived armeabi-v7a filtering"
+  fi
+
+  mkdir "$tmp/incompatible-base-source"
+  make_apk "$tmp/incompatible-base-source/base.apk" \
+    lib/arm64-v8a/libbase.so
+  make_apk "$tmp/incompatible-base-source/split_config.armeabi_v7a.apk" \
+    lib/armeabi-v7a/libselected.so
+  make_bundle "$tmp/incompatible-base.apkm" "$tmp/incompatible-base-source"
+  set +e
+  output=$(PATH="$FAKES:$PATH" FAKE_ADB_PROFILE=installer \
+    "$ROOT/avd/install-app.sh" test-serial --abi armeabi-v7a \
+    "$tmp/incompatible-base.apkm" 2>&1)
+  status=$?
+  set -e
+  [[ $status -eq 2 ]] || fail "incompatible base returned $status, expected 2"
+  grep -Fq -- "base.apk" <<<"$output" || \
+    fail "incompatible base error omitted base.apk"
+  grep -Fq -- "incompatible" <<<"$output" || \
+    fail "incompatible base error was not explicit"
 
   set +e
   output=$(PATH="$FAKES:$PATH" FAKE_ADB_PROFILE=installer \
