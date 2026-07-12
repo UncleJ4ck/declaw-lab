@@ -71,8 +71,8 @@ adb_capture abilist64 "reading ro.product.cpu.abilist64" shell getprop ro.produc
 adb_capture abilist32 "reading ro.product.cpu.abilist32" shell getprop ro.product.cpu.abilist32
 # This program is intentionally expanded by the Android guest's shell.
 # shellcheck disable=SC2016
-adb_capture compat "reading CONFIG_COMPAT" shell sh -c \
-  'config=; if [ -r /proc/config.gz ]; then config=$(gzip -dc /proc/config.gz 2>/dev/null | grep -m1 -E "^(CONFIG_COMPAT=|# CONFIG_COMPAT is not set$)" || true); elif [ -r /proc/config ]; then config=$(grep -m1 -E "^(CONFIG_COMPAT=|# CONFIG_COMPAT is not set$)" /proc/config || true); fi; if [ -n "$config" ]; then printf "%s\n" "$config"; else echo "<unreadable>"; fi'
+compat_command='config=; if [ -r /proc/config.gz ]; then config=$(gzip -dc /proc/config.gz 2>/dev/null | grep -m1 -E "^(CONFIG_COMPAT=|# CONFIG_COMPAT is not set$)" || true); elif [ -r /proc/config ]; then config=$(grep -m1 -E "^(CONFIG_COMPAT=|# CONFIG_COMPAT is not set$)" /proc/config || true); fi; if [ -n "$config" ]; then printf "%s\n" "$config"; else echo "<unreadable>"; fi'
+adb_capture compat "reading CONFIG_COMPAT" shell "$compat_command"
 
 runtime64=(
   /system/bin/app_process64
@@ -90,15 +90,13 @@ has_abi() {
 }
 
 runtime_report() {
-  local result_var=$1 path state
+  local result_var=$1 path state runtime_command
   local report=()
   shift
   for path in "$@"; do
     state=
-    # This program is intentionally expanded by the Android guest's shell.
-    # shellcheck disable=SC2016
-    adb_capture state "checking executable $path" shell sh -c \
-      'if [ -x "$1" ]; then echo executable; else echo missing; fi' sh "$path"
+    runtime_command="if [ -x '$path' ]; then echo executable; else echo missing; fi"
+    adb_capture state "checking executable $path" shell "$runtime_command"
     if [[ $state == executable ]]; then
       report+=("$path")
     elif [[ $state == missing ]]; then
@@ -135,8 +133,8 @@ elif [[ $compat == "<unreadable>" || -z $compat ]]; then
   probe=
   # This program is intentionally expanded by the Android guest's shell.
   # shellcheck disable=SC2016
-  adb_capture probe "probing 32-bit runtime execution" shell sh -c \
-    '/apex/com.android.runtime/bin/linker --help >/dev/null 2>&1; printf "status=%s\n" "$?"'
+  probe_command='/apex/com.android.runtime/bin/linker --help >/dev/null 2>&1; printf "status=%s\n" "$?"'
+  adb_capture probe "probing 32-bit runtime execution" shell "$probe_command"
   if [[ $probe == status=0 ]]; then
     compat_proof="runtime-probed:/apex/com.android.runtime/bin/linker --help"
   elif [[ $probe == status=* ]]; then

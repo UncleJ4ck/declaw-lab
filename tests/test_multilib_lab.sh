@@ -47,6 +47,9 @@ test_checker() {
   if grep -Ev '^-s test-serial( |$)' "$log" | grep -q .; then
     fail "checker made an adb call without the requested serial"
   fi
+  if grep -Fq -- " shell sh -c " "$log"; then
+    fail "checker used shell sh -c arguments that real adb serializes unsafely"
+  fi
 
   output=$(run_checker_profile arm64only 2)
   assert_line "$output" "[check] FAIL: ro.zygote=zygote64 (need zygote64_32)"
