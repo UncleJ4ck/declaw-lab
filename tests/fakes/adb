@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+set -u
+
+profile=${FAKE_ADB_PROFILE:-multilib}
+
+if [[ ${1:-} != "-s" || -z ${2:-} ]]; then
+  echo "fake adb: every call must select a serial with -s" >&2
+  exit 96
+fi
+serial=$2
+shift 2
+
+if [[ -n ${FAKE_ADB_LOG:-} ]]; then
+  printf '%s\n' "-s $serial $*" >>"$FAKE_ADB_LOG"
+fi
+
+if [[ $profile == unreachable ]]; then
+  echo "error: device '$serial' not found" >&2
+  exit 1
+fi
+
+case "${1:-} ${2:-}" in
+  "get-state ")
+    echo device
+    ;;
+  "shell getprop")
+    case "${3:-}" in
+      ro.build.version.release) echo 16 ;;
+      ro.build.version.sdk) echo 36 ;;
+      ro.zygote)
+        if [[ $profile == arm64only ]]; then echo zygote64; else echo zygote64_32; fi
+        ;;
+      ro.product.cpu.abilist64) echo arm64-v8a ;;
+      ro.product.cpu.abilist32)
+        if [[ $profile == arm64only ]]; then echo; else echo armeabi-v7a,armeabi; fi
+        ;;
+      *) exit 95 ;;
+    esac
+    ;;
+  "shell uname")
+    [[ ${3:-} == -m ]] || exit 95
+    echo aarch64
+    ;;
+  "shell id")
+    [[ ${3:-} == -u ]] || exit 95
+    echo 0
+    ;;
+  "shell getenforce")
+    echo Permissive
+    ;;
+  "shell test")
+    [[ ${3:-} == -x ]] || exit 95
+    path=${4:-}
+    case "$profile:$path" in
+      multilib:/system/bin/app_process64|multilib:/apex/com.android.runtime/bin/linker64|multilib:/system/bin/app_process32|multilib:/apex/com.android.runtime/bin/linker)
+        exit 0
+        ;;
+      arm64only:/system/bin/app_process64|arm64only:/apex/com.android.runtime/bin/linker64)
+        exit 0
+        ;;
+      *) exit 1 ;;
+    esac
+    ;;
+  "shell sh")
+    if [[ ${3:-} == -c && ${4:-} == *CONFIG_COMPAT* ]]; then
+      echo CONFIG_COMPAT=y
+    else
+      exit 95
+    fi
+    ;;
+  *)
+    echo "fake adb: unsupported call: $*" >&2
+    exit 95
+    ;;
+esac
