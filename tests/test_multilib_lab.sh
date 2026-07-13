@@ -58,6 +58,36 @@ with zipfile.ZipFile(output, "w") as archive:
 PY
 }
 
+make_utm_archive() {
+  local output=$1 mode=${2:-valid}
+  python3 - "$output" "$mode" <<'PY'
+import pathlib
+import sys
+import zipfile
+
+output = pathlib.Path(sys.argv[1])
+mode = sys.argv[2]
+root = "LineageOS_on_arm64.utm"
+entries = {
+    f"{root}/config.plist": b"plist",
+    f"{root}/Data/efi_vars.fd": b"efi-vars",
+    f"{root}/Data/vda.qcow2": b"fake-qcow2",
+    f"{root}/Data/vdb.qcow2": b"fake-data-qcow2",
+}
+if mode == "missing-layout":
+    entries.pop(f"{root}/Data/vdb.qcow2")
+elif mode == "unsafe":
+    entries["../escaped-from-archive"] = b"unsafe"
+elif mode == "duplicate-utm":
+    entries["Unexpected.utm/config.plist"] = b"unexpected"
+
+output.parent.mkdir(parents=True, exist_ok=True)
+with zipfile.ZipFile(output, "w") as archive:
+    for name, data in entries.items():
+        archive.writestr(name, data)
+PY
+}
+
 run_checker_profile() {
   local profile=$1 expected_status=$2 adb_timeout=${3:-1} output status
   set +e
@@ -396,6 +426,14 @@ exit 97
 echo 'fake qemu: boot forbidden' >&2
 exit 97
 ''',
+    "nohup": r'''#!/usr/bin/env bash
+if [[ -n ${FAKE_LAB_COMMAND_LOG:-} ]]; then
+  printf 'nohup\tLINEAGE_DIR=%q' "${LINEAGE_DIR:-<unset>}" >>"$FAKE_LAB_COMMAND_LOG"
+  printf '\t%q' "$@" >>"$FAKE_LAB_COMMAND_LOG"
+  printf '\n' >>"$FAKE_LAB_COMMAND_LOG"
+fi
+exit 0
+''',
     "emulator": r'''#!/usr/bin/env bash
 if [[ ${1:-} == -list-avds ]]; then
   echo declaw_x86_64
@@ -430,8 +468,8 @@ test_dispatch() {
   argv_log="$tmp/argv.log"
   install_log="$tmp/install.log"
   trap 'rm -rf "$tmp"' RETURN
-  mkdir -p "$home/Android/lineage-arm64" "$home/empty-sdk"
-  : >"$home/Android/lineage-arm64/vda.raw"
+  mkdir -p "$home/Android/lineage-multilib" "$home/empty-sdk"
+  : >"$home/Android/lineage-multilib/vda.raw"
   : >"$log"
   : >"$argv_log"
   : >"$install_log"
@@ -462,7 +500,7 @@ test_dispatch() {
 
   # `check` is an inspection-only command: it must work with no image and must
   # neither inspect the host qemu process nor enter the boot/download paths.
-  rm -f "$home/Android/lineage-arm64/vda.raw"
+  rm -f "$home/Android/lineage-multilib/vda.raw"
   output=$(FAKE_FORBID_PGREP=1 FAKE_LAB_COMMAND_LOG="$log" \
     run_lab "$home" "$bin" qemu check)
   assert_line "$output" "[check] PASS: one Android 16 guest runs arm64-v8a and armeabi-v7a apps"
@@ -477,7 +515,7 @@ test_dispatch() {
   [[ $status -eq 2 ]] || fail "qemu check returned $status instead of checker status 2"
   assert_line "$output" "[check] FAIL: guest does not satisfy the ARM32 + ARM64 Android 16 contract"
 
-  : >"$home/Android/lineage-arm64/vda.raw"
+  : >"$home/Android/lineage-multilib/vda.raw"
   : >"$log"
   make_apk "$tmp/demo app.apk" lib/arm64-v8a/libdemo.so
   assert_qemu_install_preflight_rejects \
@@ -515,6 +553,30 @@ test_dispatch() {
   set -e
   [[ $status -eq 2 ]] || fail "lab install on arm64-only guest returned $status, expected 2"
   [[ ! -s $install_log ]] || fail "lab install called adb after the multilib check failed"
+
+  : >"$log"
+  FAKE_PGREP_RESULT=miss FAKE_LAB_COMMAND_LOG="$log" \
+    run_lab "$home" "$bin" qemu up >/dev/null
+  for _ in {1..100}; do
+    grep -Fq -- $'nohup\t' "$log" && break
+    /usr/bin/sleep 0.01
+  done
+  grep -Fq -- $'nohup\tLINEAGE_DIR=\\<unset\\>' "$log" || \
+    fail "qemu up did not use the default multilib rig directory"
+
+  rm -f "$home/Android/lineage-multilib/vda.raw"
+  mkdir -p "$tmp/override rig"
+  : >"$tmp/override rig/vda.raw"
+  : >"$log"
+  LINEAGE_DIR="$tmp/override rig" FAKE_PGREP_RESULT=miss \
+    FAKE_LAB_COMMAND_LOG="$log" run_lab "$home" "$bin" qemu up >/dev/null
+  for _ in {1..100}; do
+    grep -Fq -- $'nohup\t' "$log" && break
+    /usr/bin/sleep 0.01
+  done
+  grep -Fq -- "LINEAGE_DIR=$(printf '%q' "$tmp/override rig")" "$log" || \
+    fail "qemu up did not honor LINEAGE_DIR override"
+  : >"$home/Android/lineage-multilib/vda.raw"
 
   : >"$log"
   FAKE_LAB_COMMAND_LOG="$log" DECLAW="$bin/declaw" \
@@ -923,11 +985,198 @@ SH
   echo "PASS: build"
 }
 
+make_provision_fakes() {
+  local bin=$1 mode=${2:-forbid}
+  mkdir -p "$bin"
+  cat >"$bin/qemu-img" <<'SH'
+#!/usr/bin/env bash
+printf 'qemu-img\t%s\n' "$*" >>"$FAKE_PROVISION_COMMAND_LOG"
+case "${FAKE_QEMU_IMG_MODE:-forbid}" in
+  forbid) exit 97 ;;
+  fail) exit 42 ;;
+  copy)
+    [[ ${1:-} == convert ]] || exit 96
+    cp -- "${@: -2:1}" "${@: -1}"
+    ;;
+  *) exit 95 ;;
+esac
+SH
+  cat >"$bin/unzip" <<'SH'
+#!/usr/bin/env bash
+printf 'unzip\t%s\n' "$*" >>"$FAKE_PROVISION_COMMAND_LOG"
+exit 97
+SH
+  cat >"$bin/curl" <<'SH'
+#!/usr/bin/env bash
+printf 'curl\t%s\n' "$*" >>"$FAKE_PROVISION_COMMAND_LOG"
+exit 97
+SH
+  cat >"$bin/taskset" <<'SH'
+#!/usr/bin/env bash
+printf 'taskset\t%s\n' "$*" >>"$FAKE_PROVISION_COMMAND_LOG"
+exit 97
+SH
+  cat >"$bin/qemu-system-aarch64" <<'SH'
+#!/usr/bin/env bash
+printf 'qemu-system-aarch64\t%s\n' "$*" >>"$FAKE_PROVISION_COMMAND_LOG"
+exit 97
+SH
+  chmod +x "$bin"/*
+}
+
+assert_no_staging_dir() {
+  local target=$1 found
+  found=$(compgen -G "${target}.staging.*" || true)
+  [[ -z $found ]] || fail "provisioning left staging directories: $found"
+}
+
+test_provision() {
+  local tmp home bin log archive before output status target build_root newest old
+  local bad wrong malformed missing unsafe duplicate sentinel boot_home override
+  tmp=$(mktemp -d)
+  home="$tmp/home"
+  bin="$tmp/bin"
+  log="$tmp/commands.log"
+  target="$home/Android/lineage-multilib"
+  archive="$tmp/UTM-VM-lineage-test-virtio_arm64.zip"
+  trap 'rm -rf "$tmp"' RETURN
+  mkdir -p "$home"
+  : >"$log"
+  make_provision_fakes "$bin"
+  make_utm_archive "$archive"
+  before=$(sha256sum "$archive" | awk '{ print $1 }')
+
+  output=$(HOME="$home" PATH="$bin:/usr/bin:/bin" \
+    FAKE_PROVISION_COMMAND_LOG="$log" LINEAGE_MULTILIB_ZIP="$archive" \
+    PROVISION_DRY_RUN=1 "$ROOT/avd/provision.sh")
+  assert_line "$output" "[provision] source=$archive"
+  assert_line "$output" "[provision] sha256=$before"
+  assert_line "$output" \
+    "[provision] contract=android=16 sdk=36 abis=arm64-v8a,armeabi-v7a,armeabi zygote=zygote64_32"
+  assert_line "$output" "[provision] target=$target"
+  grep -Fq -- "stage" <<<"$output" || fail "dry run omitted the staging action"
+  grep -Fq -- "vda.qcow2" <<<"$output" || fail "dry run omitted the conversion source"
+  grep -Fq -- "vda.raw" <<<"$output" || fail "dry run omitted the converted disk"
+  [[ ! -e $target ]] || fail "provision dry run created its target"
+  [[ $(sha256sum "$archive" | awk '{ print $1 }') == "$before" ]] || \
+    fail "provisioning modified the explicit source archive"
+  [[ ! -s $log ]] || fail "provision dry run invoked unzip, qemu, taskset, or network"
+
+  wrong="$tmp/lineage-virtio_arm64.zip"
+  cp "$archive" "$wrong"
+  bad="$tmp/UTM-VM-lineage-test-virtio_arm64only.zip"
+  cp "$archive" "$bad"
+  printf 'not a zip\n' >"$tmp/UTM-VM-malformed-virtio_arm64.zip"
+  malformed="$tmp/UTM-VM-malformed-virtio_arm64.zip"
+  missing="$tmp/UTM-VM-missing-virtio_arm64.zip"
+  unsafe="$tmp/UTM-VM-unsafe-virtio_arm64.zip"
+  duplicate="$tmp/UTM-VM-duplicate-virtio_arm64.zip"
+  make_utm_archive "$missing" missing-layout
+  make_utm_archive "$unsafe" unsafe
+  make_utm_archive "$duplicate" duplicate-utm
+  for archive in "$bad" "$wrong" "$malformed" "$missing" "$unsafe" "$duplicate"; do
+    : >"$log"
+    set +e
+    output=$(HOME="$home" PATH="$bin:/usr/bin:/bin" \
+      FAKE_PROVISION_COMMAND_LOG="$log" LINEAGE_MULTILIB_ZIP="$archive" \
+      PROVISION_DRY_RUN=1 "$ROOT/avd/provision.sh" 2>&1)
+    status=$?
+    set -e
+    [[ $status -eq 2 ]] || {
+      printf '%s\n' "$output" >&2
+      fail "invalid archive $(basename "$archive") returned $status, expected 2"
+    }
+    [[ ! -s $log ]] || fail "invalid dry-run archive invoked external mutation commands"
+    [[ ! -e $target ]] || fail "invalid archive published a rig"
+  done
+
+  build_root="$tmp/build"
+  old="$build_root/dist/20260712-old-virtio_arm64/UTM-VM-old-virtio_arm64.zip"
+  newest="$build_root/dist/20260713-new-virtio_arm64/UTM-VM-new-virtio_arm64.zip"
+  make_utm_archive "$old"
+  make_utm_archive "$newest"
+  touch -t 202607121200 "$old"
+  touch -t 202607131200 "$newest"
+  output=$(HOME="$home" PATH="$bin:/usr/bin:/bin" \
+    FAKE_PROVISION_COMMAND_LOG="$log" BUILD_ROOT="$build_root" \
+    PROVISION_DRY_RUN=1 "$ROOT/avd/provision.sh")
+  assert_line "$output" "[provision] source=$newest"
+
+  mkdir -p "$target"
+  sentinel="$target/operator-data"
+  printf 'keep me\n' >"$sentinel"
+  set +e
+  output=$(HOME="$home" PATH="$bin:/usr/bin:/bin" \
+    FAKE_PROVISION_COMMAND_LOG="$log" LINEAGE_MULTILIB_ZIP="$newest" \
+    "$ROOT/avd/provision.sh" 2>&1)
+  status=$?
+  set -e
+  [[ $status -eq 2 ]] || fail "existing target returned $status, expected 2"
+  [[ $(<"$sentinel") == 'keep me' ]] || fail "existing rig sentinel was overwritten"
+  rm -rf "$target"
+
+  cp /usr/bin/unzip "$bin/unzip"
+  : >"$log"
+  set +e
+  output=$(HOME="$home" PATH="$bin:/usr/bin:/bin" \
+    FAKE_QEMU_IMG_MODE=fail FAKE_PROVISION_COMMAND_LOG="$log" \
+    LINEAGE_MULTILIB_ZIP="$newest" "$ROOT/avd/provision.sh" 2>&1)
+  status=$?
+  set -e
+  [[ $status -eq 42 ]] || fail "injected conversion failure returned $status, expected 42"
+  [[ ! -e $target ]] || fail "conversion failure published a partial rig"
+  assert_no_staging_dir "$target"
+
+  # Let extraction and conversion succeed, then fail the first partition probe.
+  # The published target must still be absent and staging must be cleaned.
+  cat >"$bin/parted" <<'SH'
+#!/usr/bin/env bash
+printf 'parted\t%s\n' "$*" >>"$FAKE_PROVISION_COMMAND_LOG"
+exit 43
+SH
+  chmod +x "$bin/parted"
+  : >"$log"
+  set +e
+  output=$(HOME="$home" PATH="$bin:/usr/bin:/bin" \
+    FAKE_QEMU_IMG_MODE=copy FAKE_PROVISION_COMMAND_LOG="$log" \
+    LINEAGE_MULTILIB_ZIP="$newest" "$ROOT/avd/provision.sh" 2>&1)
+  status=$?
+  set -e
+  [[ $status -ne 0 ]] || fail "injected patch failure unexpectedly succeeded"
+  [[ ! -e $target ]] || fail "patch failure published a partial rig"
+  assert_no_staging_dir "$target"
+
+  boot_home="$tmp/boot-home"
+  : >"$log"
+  output=$(HOME="$boot_home" PATH="$bin:/usr/bin:/bin" \
+    FAKE_PROVISION_COMMAND_LOG="$log" DRY_RUN=1 "$ROOT/avd/boot-arm64.sh")
+  grep -Fq -- 'qemu-system-aarch64' <<<"$output" || fail "boot dry run omitted ARM QEMU"
+  grep -Fq -- '-cpu max,pauth-impdef=on' <<<"$output" || fail "boot dry run omitted ARM CPU"
+  grep -Fq -- '-accel tcg,thread=multi,tb-size=1024' <<<"$output" || \
+    fail "boot dry run omitted tuned TCG"
+  grep -Fq -- "$boot_home/Android/lineage-multilib/vda.raw" <<<"$output" || \
+    fail "boot dry run did not use the multilib directory"
+  if grep -Eqi 'qemu-system-x86|(^|[^[:alnum:]])kvm([^[:alnum:]]|$)|native.?bridge' <<<"$output"; then
+    fail "boot dry run emitted a forbidden x86/KVM/native-bridge path"
+  fi
+  [[ ! -e $boot_home/Android ]] || fail "boot dry run wrote its run directory or firmware"
+  [[ ! -s $log ]] || fail "boot dry run invoked qemu or taskset"
+
+  override="$tmp/custom rig"
+  output=$(HOME="$boot_home" LINEAGE_DIR="$override" PATH="$bin:/usr/bin:/bin" \
+    FAKE_PROVISION_COMMAND_LOG="$log" DRY_RUN=1 "$ROOT/avd/boot-arm64.sh")
+  grep -Fq -- "$override/vda.raw" <<<"$output" || \
+    fail "boot dry run ignored LINEAGE_DIR override"
+
+  echo "PASS: provision"
+}
+
 case ${1:-all} in
   checker) test_checker ;;
   installer) test_installer ;;
   dispatch) test_dispatch ;;
   build) test_build ;;
-  all) test_checker; test_installer; test_dispatch; test_build ;;
+  provision) test_provision ;;
+  all) test_checker; test_installer; test_dispatch; test_build; test_provision ;;
   *) fail "unknown test group: ${1:-}" ;;
 esac

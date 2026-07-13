@@ -1,87 +1,288 @@
 #!/usr/bin/env bash
-# One-shot: turn the stock LineageOS arm64 QEMU image into a pentester-ready
-# rooted rig disk (vda.raw). Idempotent. After this, `arm64 up` + `arm64 root`
-# give a rooted aarch64 Android 16 shell for testing declaw's arm64 primitives.
-#
-# What it does and WHY (each is required, learned the hard way):
-#   1. vendor_boot cmdline += androidboot.selinux=permissive
-#        The image's minigbm gralloc allocates via /dev/udmabuf, which the stock
-#        SELinux policy denies to surfaceflinger/apps -> crash-loop, no boot. This
-#        LineageOS build honors permissive from the cmdline, so it boots clean.
-#   2. /system build.prop  ro.debuggable=0 -> 1
-#        Lets `adb root` run (user-build adbd otherwise drops root) AND keeps adbd
-#        out of Android 16 trade-in mode (which blocks shell on unprovisioned VMs).
-#   3. /system build.prop  ro.adb.secure=1 -> 0
-#        No RSA-auth prompt (there is no GUI to tap "allow"), so adb is "device"
-#        not "offline" on fresh /data.
-# AVB is `orange` on this image (no vbmeta partition), so nothing verifies these
-# edits. They are same-length byte patches, safe on the ext4 system (no verity).
+# Provision a fresh LineageOS Android 16 virtio_arm64 multilib artifact into a
+# rooted, permissive QEMU rig. The older lineage-arm64 rig is intentionally not
+# read or modified; this script publishes only to lineage-multilib by default.
 set -euo pipefail
 
-DIR="${LINEAGE_DIR:-$HOME/Android/lineage-arm64}"
-VER="${LINEAGE_VER:-v2026.07.09}"
-ZIP="UTM-VM-lineage-23.2-20260709-jqssun-virtio_arm64only.zip"
-URL="https://github.com/jqssun/android-lineage-qemu/releases/download/${VER}/${ZIP}"
-RAW="$DIR/vda.raw"
-UTMDATA="$DIR/LineageOS_on_arm64.utm/Data"
+DIR="${LINEAGE_DIR:-$HOME/Android/lineage-multilib}"
+BUILD_ROOT="${BUILD_ROOT:-$HOME/Android/lineage-multilib-build}"
+DRY_RUN="${PROVISION_DRY_RUN:-0}"
+UTM_ROOT=LineageOS_on_arm64.utm
+CONTRACT='android=16 sdk=36 abis=arm64-v8a,armeabi-v7a,armeabi zygote=zygote64_32'
+STAGE=""
 
-need() { command -v "$1" >/dev/null || { echo "[provision] missing dependency: $1"; exit 1; }; }
-for t in qemu-img parted unzip curl python3; do need "$t"; done
-[ -f /usr/share/edk2/aarch64/QEMU_EFI.fd ] || { echo "[provision] install edk2-aarch64 (QEMU_EFI.fd)"; exit 1; }
+error() {
+  echo "[provision] ERROR: $*" >&2
+  exit 2
+}
 
-mkdir -p "$DIR"; cd "$DIR"
+need() {
+  command -v "$1" >/dev/null 2>&1 || error "missing dependency: $1"
+}
 
-# 1. fetch + unpack the stock image
-if [ ! -f "$UTMDATA/vda.qcow2" ]; then
-  [ -f "$ZIP" ] || { echo "[provision] downloading $ZIP (~1.1G)"; curl -fSL "$URL" -o "$ZIP"; }
-  echo "[provision] unzipping"; unzip -o -q "$ZIP"
-fi
+discover_archive() {
+  local candidate newest=""
+  local -a candidates=()
+  shopt -s nullglob
+  candidates=("$BUILD_ROOT"/dist/*-virtio_arm64/UTM-VM-*-virtio_arm64.zip)
+  shopt -u nullglob
+  ((${#candidates[@]} > 0)) || \
+    error "no multilib artifact found under $BUILD_ROOT/dist/*-virtio_arm64"
+  for candidate in "${candidates[@]}"; do
+    [[ -z $newest || $candidate -nt $newest ]] && newest=$candidate
+  done
+  printf '%s\n' "$newest"
+}
 
-# 2. qcow2 -> raw (boot the raw; byte-patchable in place). Skip if already made.
-if [ ! -f "$RAW" ]; then
-  echo "[provision] converting vda.qcow2 -> vda.raw"
-  qemu-img convert -O raw "$UTMDATA/vda.qcow2" "$RAW"
-fi
+validate_archive_name() {
+  local name=${1##*/}
+  case "$name" in
+    UTM-VM-*-virtio_arm64.zip) ;;
+    *) error "artifact must be an exact UTM-VM-*-virtio_arm64.zip multilib build: $name" ;;
+  esac
+  [[ $name != *arm64only* ]] || error "arm64only artifacts are forbidden: $name"
+}
 
-# 3. patch vendor_boot cmdline (permissive from boot)
-VB_START=$(parted -sm "$RAW" unit s print 2>/dev/null | awk -F: '/vendor_boot/{gsub("s","",$2);print $2}')
-VB_SIZE=$(parted -sm "$RAW" unit s print 2>/dev/null | awk -F: '/vendor_boot/{gsub("s","",$4);print $4}')
-[ -n "$VB_START" ] || { echo "[provision] no vendor_boot partition found"; exit 1; }
-echo "[provision] patching vendor_boot cmdline (permissive)"
-dd if="$RAW" of="$DIR/.vb.img" bs=512 skip="$VB_START" count="$VB_SIZE" status=none
-python3 - "$DIR/.vb.img" <<'PY'
+validate_archive_layout() {
+  local archive=$1
+  python3 - "$archive" "$UTM_ROOT" <<'PY' || exit $?
+import pathlib
+import stat
 import sys
-f=sys.argv[1]; d=bytearray(open(f,"rb").read())
-assert d[:8]==b"VNDRBOOT", "not a vendor_boot image"
-OFF,SIZE=28,2048
-cur=d[OFF:OFF+SIZE].split(b"\x00",1)[0].decode()
-add=" androidboot.debuggable=1 androidboot.selinux=permissive"
-if "androidboot.selinux=permissive" not in cur:
-    new=(cur+add).encode(); assert len(new)<SIZE
-    d[OFF:OFF+SIZE]=new+b"\x00"*(SIZE-len(new))
-    open(f,"wb").write(d); print("  cmdline patched")
-else:
-    print("  already permissive, skip")
-PY
-dd if="$DIR/.vb.img" of="$RAW" bs=512 seek="$VB_START" count="$VB_SIZE" conv=notrunc status=none
-rm -f "$DIR/.vb.img"
+import zipfile
 
-# 4. patch build.prop props (ro.debuggable=1, ro.adb.secure=0) via mmap, in place
-echo "[provision] patching ro.debuggable=1 and ro.adb.secure=0"
-python3 - "$RAW" <<'PY'
-import sys, mmap, re
-f=open(sys.argv[1],"r+b"); mm=mmap.mmap(f.fileno(),0)
-def flip(find, pos, ch):
-    n=0
-    for m in re.finditer(re.escape(find), mm):
-        i=m.start()+pos
-        if mm[i:i+1]!=ch: mm[i:i+1]=ch; n+=1
-    return n
-a=flip(b"ro.debuggable=0", len("ro.debuggable="), b"1")
-b=flip(b"ro.adb.secure=1", len("ro.adb.secure="), b"0")
-mm.flush(); mm.close(); f.close()
-print(f"  ro.debuggable flipped: {a}   ro.adb.secure flipped: {b}")
-PY
+archive = pathlib.Path(sys.argv[1])
+root = sys.argv[2]
+required = {
+    f"{root}/config.plist",
+    f"{root}/Data/efi_vars.fd",
+    f"{root}/Data/vda.qcow2",
+    f"{root}/Data/vdb.qcow2",
+}
 
-echo "[provision] done. Rooted-ready disk: $RAW"
-echo "[provision] next: arm64 up   &&   arm64 root"
+def reject(message):
+    print(f"[provision] ERROR: {message}", file=sys.stderr)
+    raise SystemExit(2)
+
+try:
+    with zipfile.ZipFile(archive) as bundle:
+        infos = bundle.infolist()
+        names = [info.filename for info in infos]
+except (OSError, zipfile.BadZipFile) as exc:
+    reject(f"malformed UTM ZIP: {archive}: {exc}")
+
+if len(names) != len(set(names)):
+    reject("archive contains duplicate entries")
+
+for info in infos:
+    name = info.filename
+    if "\\" in name or "\x00" in name:
+        reject(f"unsafe archive path: {name!r}")
+    path = pathlib.PurePosixPath(name)
+    if path.is_absolute() or ".." in path.parts or not path.parts:
+        reject(f"unsafe archive path: {name!r}")
+    mode = info.external_attr >> 16
+    if mode and stat.S_ISLNK(mode):
+        reject(f"archive symlink is not allowed: {name}")
+
+utm_roots = {
+    pathlib.PurePosixPath(name).parts[0]
+    for name in names
+    if pathlib.PurePosixPath(name).parts
+    and pathlib.PurePosixPath(name).parts[0].endswith(".utm")
+}
+if utm_roots != {root}:
+    reject(f"archive must contain exactly one {root} layout")
+
+missing = sorted(required.difference(names))
+if missing:
+    reject("archive is missing required UTM entries: " + ", ".join(missing))
+
+for expected in required:
+    info = next(item for item in infos if item.filename == expected)
+    if info.is_dir():
+        reject(f"required UTM entry is a directory: {expected}")
+PY
+}
+
+patch_vendor_boot() {
+  local raw=$1 work=$2 vb_start vb_size vb_image verify_image
+  vb_start=$(parted -sm "$raw" unit s print 2>/dev/null | \
+    awk -F: '/vendor_boot/{gsub("s","",$2); print $2}')
+  vb_size=$(parted -sm "$raw" unit s print 2>/dev/null | \
+    awk -F: '/vendor_boot/{gsub("s","",$4); print $4}')
+  [[ $vb_start =~ ^[0-9]+$ && $vb_size =~ ^[1-9][0-9]*$ ]] || \
+    error "no valid vendor_boot partition found"
+
+  vb_image="$work/.vendor_boot.img"
+  verify_image="$work/.vendor_boot.verify.img"
+  dd if="$raw" of="$vb_image" bs=512 skip="$vb_start" count="$vb_size" status=none
+  python3 - "$vb_image" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+data = bytearray(path.read_bytes())
+if data[:8] != b"VNDRBOOT":
+    raise SystemExit("[provision] ERROR: vendor_boot header is not VNDRBOOT")
+offset, size = 28, 2048
+raw = bytes(data[offset:offset + size]).split(b"\0", 1)[0]
+try:
+    current = raw.decode("ascii")
+except UnicodeDecodeError as exc:
+    raise SystemExit(f"[provision] ERROR: vendor_boot cmdline is not ASCII: {exc}")
+
+required = ("androidboot.debuggable=1", "androidboot.selinux=permissive")
+for token in required:
+    count = current.split().count(token)
+    if count > 1:
+        raise SystemExit(f"[provision] ERROR: vendor_boot cmdline repeats {token}")
+missing = [token for token in required if token not in current.split()]
+updated = (current + (" " if current and missing else "") + " ".join(missing)).encode("ascii")
+if len(updated) >= size:
+    raise SystemExit("[provision] ERROR: patched vendor_boot cmdline does not fit")
+data[offset:offset + size] = updated + b"\0" * (size - len(updated))
+path.write_bytes(data)
+PY
+  dd if="$vb_image" of="$raw" bs=512 seek="$vb_start" count="$vb_size" \
+    conv=notrunc status=none
+
+  dd if="$raw" of="$verify_image" bs=512 skip="$vb_start" count="$vb_size" status=none
+  python3 - "$verify_image" <<'PY'
+import pathlib
+import sys
+
+data = pathlib.Path(sys.argv[1]).read_bytes()
+if data[:8] != b"VNDRBOOT":
+    raise SystemExit("[provision] ERROR: patched vendor_boot header changed")
+cmdline = data[28:28 + 2048].split(b"\0", 1)[0].decode("ascii").split()
+for token in ("androidboot.debuggable=1", "androidboot.selinux=permissive"):
+    if cmdline.count(token) != 1:
+        raise SystemExit(f"[provision] ERROR: vendor_boot postcondition failed for {token}")
+PY
+  rm -f -- "$vb_image" "$verify_image"
+}
+
+patch_system_properties() {
+  local raw=$1
+  python3 - "$raw" <<'PY'
+import mmap
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+with path.open("r+b") as stream, mmap.mmap(stream.fileno(), 0) as image:
+    def count_occurrences(needle):
+        count = 0
+        cursor = 0
+        while True:
+            offset = image.find(needle, cursor)
+            if offset < 0:
+                return count
+            count += 1
+            cursor = offset + len(needle)
+
+    pairs = (
+        (b"ro.debuggable=0", b"ro.debuggable=1"),
+        (b"ro.adb.secure=1", b"ro.adb.secure=0"),
+    )
+    expected = {}
+    for source, target in pairs:
+        source_count = count_occurrences(source)
+        target_count = count_occurrences(target)
+        if source_count < 1:
+            raise SystemExit(
+                f"[provision] ERROR: expected source bytes {source.decode()} were not found"
+            )
+        expected[target] = target_count + source_count
+        cursor = 0
+        while True:
+            offset = image.find(source, cursor)
+            if offset < 0:
+                break
+            image[offset:offset + len(source)] = target
+            cursor = offset + len(target)
+    image.flush()
+    for source, target in pairs:
+        if count_occurrences(source) != 0 or count_occurrences(target) != expected[target]:
+            raise SystemExit(
+                f"[provision] ERROR: property patch postcondition failed for {target.decode()}"
+            )
+PY
+}
+
+cleanup() {
+  if [[ -n $STAGE && -d $STAGE ]]; then
+    rm -rf -- "$STAGE"
+  fi
+}
+
+ARCHIVE="${LINEAGE_MULTILIB_ZIP:-}"
+[[ -n $ARCHIVE ]] || ARCHIVE=$(discover_archive)
+[[ -f $ARCHIVE ]] || error "artifact not found: $ARCHIVE"
+ARCHIVE=$(cd "$(dirname "$ARCHIVE")" && pwd -P)/$(basename "$ARCHIVE")
+validate_archive_name "$ARCHIVE"
+need python3
+need sha256sum
+validate_archive_layout "$ARCHIVE"
+SOURCE_SHA=$(sha256sum "$ARCHIVE" | awk '{print $1}')
+
+echo "[provision] source=$ARCHIVE"
+echo "[provision] sha256=$SOURCE_SHA"
+echo "[provision] contract=$CONTRACT"
+echo "[provision] target=$DIR"
+
+if [[ $DRY_RUN == 1 ]]; then
+  echo "[provision] dry-run: stage ${DIR}.staging.XXXXXX"
+  echo "[provision] dry-run: extract $UTM_ROOT with validated safe paths"
+  echo "[provision] dry-run: convert $UTM_ROOT/Data/vda.qcow2 -> vda.raw"
+  echo "[provision] dry-run: patch staging vendor_boot and Android properties"
+  echo "[provision] dry-run: write artifact.sha256 and provenance.txt"
+  echo "[provision] dry-run: atomically publish staging -> $DIR"
+  exit 0
+fi
+
+[[ ! -e $DIR && ! -L $DIR ]] || error "target already exists; refusing to overwrite: $DIR"
+for tool in unzip qemu-img parted dd python3 sha256sum awk mktemp; do
+  need "$tool"
+done
+
+mkdir -p -- "$(dirname "$DIR")"
+STAGE=$(mktemp -d "${DIR}.staging.XXXXXX")
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+echo "[provision] extracting validated UTM artifact into staging"
+unzip -q "$ARCHIVE" -d "$STAGE"
+DATA="$STAGE/$UTM_ROOT/Data"
+for path in "$STAGE/$UTM_ROOT/config.plist" "$DATA/efi_vars.fd" \
+  "$DATA/vda.qcow2" "$DATA/vdb.qcow2"; do
+  [[ -f $path ]] || error "extracted layout lost required file: $path"
+done
+
+echo "[provision] converting vda.qcow2 -> vda.raw"
+qemu-img convert -O raw "$DATA/vda.qcow2" "$STAGE/vda.raw"
+[[ -s $STAGE/vda.raw ]] || error "qemu-img produced an empty vda.raw"
+
+echo "[provision] patching staged vendor_boot cmdline"
+patch_vendor_boot "$STAGE/vda.raw" "$STAGE"
+echo "[provision] patching staged ro.debuggable and ro.adb.secure properties"
+patch_system_properties "$STAGE/vda.raw"
+
+RAW_SHA=$(sha256sum "$STAGE/vda.raw" | awk '{print $1}')
+printf '%s  %s\n' "$SOURCE_SHA" "$(basename "$ARCHIVE")" >"$STAGE/artifact.sha256"
+cat >"$STAGE/provenance.txt" <<EOF
+source=$ARCHIVE
+source_sha256=$SOURCE_SHA
+vda_raw_sha256=$RAW_SHA
+contract=$CONTRACT
+EOF
+
+[[ ! -e $DIR && ! -L $DIR ]] || error "target appeared during provisioning; refusing to overwrite: $DIR"
+mv -T -- "$STAGE" "$DIR"
+STAGE=""
+trap - EXIT HUP INT TERM
+echo "[provision] PASS: published complete multilib rig at $DIR"
+echo "[provision] next: avd/lab qemu up && avd/lab qemu check"

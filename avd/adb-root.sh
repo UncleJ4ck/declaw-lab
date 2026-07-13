@@ -8,7 +8,7 @@
 set -u
 PORT="${ADB_PORT:-6555}"; D="localhost:$PORT"
 adb connect "$D" >/dev/null 2>&1
-for i in $(seq 1 40); do
+for _ in $(seq 1 40); do
   [ "$(adb -s "$D" get-state 2>/dev/null)" = "device" ] && \
     [ "$(timeout 8 adb -s "$D" shell echo OK 2>/dev/null | tr -d '\r')" = "OK" ] && break
   sleep 5; adb connect "$D" >/dev/null 2>&1

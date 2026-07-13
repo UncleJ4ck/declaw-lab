@@ -47,10 +47,13 @@ case "${1:-}" in
 esac
 
 # ---------------------------------------------------------------- qemu (arm64)
-QPORT=6555; QDEV="localhost:$QPORT"; QRUN="$HOME/Android/lineage-arm64/run"
+QPORT=6555
+QDEV="localhost:$QPORT"
+QDIR="${LINEAGE_DIR:-$HOME/Android/lineage-multilib}"
+QRUN="$QDIR/run"
 qemu_up() {
   pgrep -f 'qemu-system-aarch64.*declaw-lineage' >/dev/null && { echo "[qemu] already up"; return; }
-  [ -f "$HOME/Android/lineage-arm64/vda.raw" ] || { echo "[qemu] run 'lab qemu provision' first"; exit 1; }
+  [ -f "$QDIR/vda.raw" ] || { echo "[qemu] run 'lab qemu provision' first"; exit 1; }
   nohup "$HERE/boot-arm64.sh" >/tmp/declaw-qemu.log 2>&1 &
   echo "[qemu] booting (headless, ~4 min first time). tail /tmp/declaw-qemu.log"
 }
@@ -87,7 +90,7 @@ qemu_status() {
   echo "[qemu] abilist32=${abilist32:-<empty>}"
 }
 qemu_ensure() {  # boot (if needed) + wait + root; returns with the device up and rooted
-  [ -f "$HOME/Android/lineage-arm64/vda.raw" ] || { echo "[qemu] run 'lab qemu provision' first"; exit 1; }
+  [ -f "$QDIR/vda.raw" ] || { echo "[qemu] run 'lab qemu provision' first"; exit 1; }
   qemu_up; echo "[qemu] waiting for boot (first cold boot ~4 min)..."
   adb connect "$QDEV" >/dev/null 2>&1 || true
   for _ in $(seq 1 90); do
