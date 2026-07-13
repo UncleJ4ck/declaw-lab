@@ -14,3 +14,7 @@ capture/traffic.log
 
 # python
 __pycache__/
+
+# local LineageOS source/build outputs
+.lineage-multilib-build/
+dist/

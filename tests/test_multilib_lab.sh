@@ -594,10 +594,152 @@ test_dispatch() {
   echo "PASS: dispatch"
 }
 
+make_build_fakes() {
+  local bin=$1
+  mkdir -p "$bin"
+  for command in git curl repo; do
+    cat >"$bin/$command" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${0##*/}" >>"$FAKE_BUILD_NETWORK_LOG"
+echo "fake ${0##*/}: network/source access forbidden" >&2
+exit 97
+SH
+    chmod +x "$bin/$command"
+  done
+}
+
+run_build_preflight() {
+  local bin=$1 disk_gib=$2 ram_gib=$3
+  shift 3
+  PATH="$bin:/usr/bin:/bin" BUILD_TEST_MODE=1 \
+    BUILD_TEST_REQUIRED_TOOLS=bash BUILD_TEST_DISK_GIB="$disk_gib" \
+    BUILD_TEST_RAM_GIB="$ram_gib" BUILD_PREFLIGHT_ONLY=1 \
+    "$ROOT/avd/build-lineage-multilib.sh" "$@"
+}
+
+test_build() {
+  local tmp bin log output status root dist product valid_utm valid_ota
+  tmp=$(mktemp -d)
+  bin="$tmp/bin"
+  log="$tmp/network.log"
+  root="$tmp/build root"
+  dist="$tmp/dist output"
+  trap 'rm -rf "$tmp"' RETURN
+  : >"$log"
+  make_build_fakes "$bin"
+
+  set +e
+  output=$(PATH="$bin:/usr/bin:/bin" FAKE_BUILD_NETWORK_LOG="$log" \
+    BUILD_DRY_RUN=1 BUILD_ROOT="$root" BUILD_DIST_DIR="$dist" \
+    BUILD_TIMESTAMP=20260713T120000Z \
+    "$ROOT/avd/build-lineage-multilib.sh" 2>&1)
+  status=$?
+  set -e
+  [[ $status -eq 0 ]] || {
+    printf '%s\n' "$output" >&2
+    fail "builder dry run returned $status"
+  }
+  assert_line "$output" \
+    "[build] branch=lineage-23.2 target=virtio_arm64 variant=user"
+  assert_line "$output" \
+    "[build] abis=arm64-v8a,armeabi-v7a,armeabi zygote=zygote64_32"
+  assert_line "$output" \
+    "[build] builder=https://github.com/jqssun/android-lineage-qemu.git ref=v2026.07.09 commit=54fc5dc82fa05778be15c1200240be53f707a542"
+  assert_line "$output" \
+    "[build] manifest=https://github.com/LineageOS/android.git branch=lineage-23.2"
+  assert_line "$output" \
+    "[build] repo=https://storage.googleapis.com/git-repo-downloads/repo-2.54 sha256=6cba294d6218bbd4a1500598207b3979c752c7a122aef9429e4d7fef688833b5"
+  assert_line "$output" "[build] root=$root"
+  assert_line "$output" "[build] dist=$dist"
+  assert_line "$output" "source $root/source/build/envsetup.sh"
+  assert_line "$output" "breakfast virtio_arm64 user"
+  assert_line "$output" "m vm-utm-zip otapackage"
+  if grep -Eqi 'arm64only|(^|[^[:alnum:]_])x86([^[:alnum:]_]|$)|kvm|native.?bridge' <<<"$output"; then
+    printf '%s\n' "$output" >&2
+    fail "builder dry run emitted a forbidden target, accelerator, or translation layer"
+  fi
+  [[ ! -s $log ]] || fail "builder dry run invoked a network/source command"
+
+  product="$tmp/product"
+  mkdir -p "$product"
+  : >"$product/UTM-VM-lineage-test-virtio_arm64only.zip"
+  set +e
+  output=$(bash -c 'source "$1"; find_utm_artifact "$2"' \
+    build-artifact-test "$ROOT/avd/build-lineage-multilib.sh" "$product" 2>&1)
+  status=$?
+  set -e
+  [[ $status -eq 2 ]] || fail "wrong-product UTM artifact returned $status, expected 2"
+  grep -Fq -- "found 0" <<<"$output" || \
+    fail "UTM discovery accepted an artifact for the wrong product"
+
+  valid_utm="$product/UTM-VM-lineage-test-virtio_arm64.zip"
+  : >"$valid_utm"
+  output=$(bash -c 'source "$1"; find_utm_artifact "$2"' \
+    build-artifact-test "$ROOT/avd/build-lineage-multilib.sh" "$product")
+  [[ $output == "$valid_utm" ]] || fail "UTM discovery did not return the sole exact artifact"
+  : >"$product/UTM-VM-lineage-other-virtio_arm64.zip"
+  assert_status 2 bash -c 'source "$1"; find_utm_artifact "$2"' \
+    build-artifact-test "$ROOT/avd/build-lineage-multilib.sh" "$product"
+
+  valid_ota="$product/lineage-23.2-test-virtio_arm64.zip"
+  : >"$valid_ota"
+  output=$(bash -c 'source "$1"; find_ota_artifact "$2"' \
+    build-artifact-test "$ROOT/avd/build-lineage-multilib.sh" "$product")
+  [[ $output == "$valid_ota" ]] || fail "OTA discovery did not return the sole exact artifact"
+  : >"$product/lineage-23.2-other-virtio_arm64.zip"
+  assert_status 2 bash -c 'source "$1"; find_ota_artifact "$2"' \
+    build-artifact-test "$ROOT/avd/build-lineage-multilib.sh" "$product"
+
+  : >"$log"
+  set +e
+  output=$(PATH="$bin:/usr/bin:/bin" FAKE_BUILD_NETWORK_LOG="$log" \
+    BUILD_TEST_MODE=1 BUILD_TEST_REQUIRED_TOOLS=missing-lineage-tool \
+    BUILD_TEST_DISK_GIB=999 BUILD_TEST_RAM_GIB=999 BUILD_PREFLIGHT_ONLY=1 \
+    BUILD_ROOT="$root" "$ROOT/avd/build-lineage-multilib.sh" 2>&1)
+  status=$?
+  set -e
+  [[ $status -eq 2 ]] || fail "missing build tool returned $status, expected 2"
+  grep -Fq -- "missing required host tool: missing-lineage-tool" <<<"$output" || \
+    fail "missing-tool preflight omitted the tool name"
+  [[ ! -s $log ]] || fail "missing-tool preflight reached git/curl/repo"
+
+  : >"$log"
+  set +e
+  output=$(FAKE_BUILD_NETWORK_LOG="$log" run_build_preflight "$bin" 399 64 2>&1)
+  status=$?
+  set -e
+  [[ $status -eq 2 ]] || fail "undersized disk returned $status, expected 2"
+  grep -Fq -- "need at least 400 GiB free" <<<"$output" || \
+    fail "disk preflight omitted the 400 GiB requirement"
+  [[ ! -s $log ]] || fail "disk preflight reached git/curl/repo"
+
+  : >"$log"
+  set +e
+  output=$(FAKE_BUILD_NETWORK_LOG="$log" run_build_preflight "$bin" 400 63 2>&1)
+  status=$?
+  set -e
+  [[ $status -eq 2 ]] || fail "undersized RAM returned $status, expected 2"
+  grep -Fq -- "need at least 64 GiB RAM" <<<"$output" || \
+    fail "RAM preflight omitted the 64 GiB requirement"
+  [[ ! -s $log ]] || fail "RAM preflight reached git/curl/repo"
+
+  : >"$log"
+  output=$(FAKE_BUILD_NETWORK_LOG="$log" ALLOW_UNDERSIZED_BUILD=1 \
+    run_build_preflight "$bin" 1 1 2>&1)
+  grep -Fq -- "WARNING: continuing with 1 GiB free and 1 GiB RAM" <<<"$output" || \
+    fail "undersized override omitted a prominent warning"
+  grep -Fq -- "[build] preflight-only: PASS" <<<"$output" || \
+    fail "preflight-only success was not explicit"
+  [[ ! -s $log ]] || fail "preflight-only mode reached git/curl/repo"
+
+  echo "PASS: build"
+}
+
 case ${1:-all} in
   checker) test_checker ;;
   installer) test_installer ;;
   dispatch) test_dispatch ;;
-  all) test_checker; test_installer; test_dispatch ;;
+  build) test_build ;;
+  all) test_checker; test_installer; test_dispatch; test_build ;;
   *) fail "unknown test group: ${1:-}" ;;
 esac
