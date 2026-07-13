@@ -1,7 +1,10 @@
-# Real aarch64 test env for declaw
+# Native ARM guest-ISA test environment for declaw
 
-Testing declaw properly needs a **real arm64 Android with root**. Two walls make
-this awkward on an x86 workstation, and this doc records the honest options.
+Testing declaw properly needs a rooted Android guest that actually executes ARM
+app code. The delivered guest supports both AArch64 and AArch32 in one Android
+16 boot. On this x86 workstation, QEMU TCG implements that ARM CPU in software;
+this does not make the x86 host physical ARM hardware. There is no x86 Android
+Native Bridge in the qemu path.
 
 ## Why it is hard (first principles)
 
@@ -13,14 +16,16 @@ this awkward on an x86 workstation, and this doc records the honest options.
    36.6.11): `Avd's CPU Architecture 'arm64' is not supported by the QEMU2
    emulator on x86_64 host`. Google removed arm64-on-x86 TCG from the emulator.
 
-So the only local path to real arm64 is **upstream `qemu-system-aarch64` + an
-arm64 Android image**, tuned as hard as TCG allows.
+So the only local path to the ARM guest ISA is **upstream
+`qemu-system-aarch64` + an ARM multilib Android image**, tuned as hard as TCG
+allows. The guest executes the ARM ISA and reports an `aarch64` kernel; the host
+still translates those instructions in software.
 
 ## The tiers
 
-| Tier | What | arm64 real? | Speed | Root | Cost |
+| Tier | What | ARM execution | Speed | Root | Cost |
 |---|---|---|---|---|---|
-| **1. Local qemu TCG** (this repo) | qemu-system-aarch64 + LineageOS 23.2 (Android 16) arm64 | yes | TCG, tuned | yes | free |
+| **1. Local qemu TCG** (this repo) | qemu-system-aarch64 + LineageOS 23.2 Android 16 `virtio_arm64` multilib | AArch64 + AArch32 guest ISA | TCG, tuned | yes | free |
 | **2. Cloud arm64 metal** | c7g/c6g.metal or Ampere bare-metal + Cuttlefish/AVD, KVM | yes | native-fast | yes | ~$2/hr |
 | **3. Corellium** | CHARM arm hypervisor, instant root, built-in TLS strip + Frida | yes | native-fast | instant | enterprise |
 | x86_64 + ndk-translation | x86_64 AVD (KVM) running arm apps via translation | no (translated) | fast | yes | free |
@@ -35,18 +40,28 @@ one path can be validated at KVM-native speed on an x86_64 image. It does NOT
 validate the arm64-only primitives (mempatch, HWBP) or Frida-heavy capture, which
 operate on translated code.
 
-## The local rig (tier 1)
+## Build and provision the local rig (tier 1)
 
-```
-avd/setup.sh          # one-time: SDK bits (kept for the x86_64 lane)
-avd/boot-arm64.sh     # boot LineageOS arm64 under qemu with the fast-TCG flags
-avd/install-ca.sh     # inject the mitmproxy CA into the Android 14+ conscrypt APEX
+Run from the repository root so the source tree, pinned builder snapshot, tools,
+temporary files, and distribution artifacts stay inside this clone:
+
+```bash
+BUILD_ROOT=$PWD/.lineage-multilib-build ./avd/build-lineage-multilib.sh
+BUILD_ROOT=$PWD/.lineage-multilib-build ./avd/lab qemu provision
 ```
 
-Image: `jqssun/android-lineage-qemu` release `UTM-VM-...virtio_arm64only.zip`
-(LineageOS 23.2 = Android 16, non-A/B, 4 GB super). Extract the `.utm` bundle;
-`boot-arm64.sh` points at its `Data/` qcow2s and supplies its own 64 MB edk2
-pflash (the bundle's 328 KB `efi_vars.fd` is UTM's format, wrong size for qemu).
+The builder pins the jqssun builder revision, Repo launcher and hash, LineageOS
+manifest URL, `lineage-23.2`, product `virtio_arm64`, and `user` variant. Its
+distribution directory contains the exact `UTM-VM-*-virtio_arm64.zip`, an OTA,
+`build-metadata.txt`, source manifest, and `SHA256SUMS`. Provisioning requires
+the metadata to declare `arm64-v8a,armeabi-v7a,armeabi` and `zygote64_32`, checks
+the archive and metadata hashes, rejects `arm64only`, patches a staged copy, and
+atomically publishes `$HOME/Android/lineage-multilib`. The former arm64-only rig
+is not read or overwritten.
+
+The builder enforces the AOSP planning floor of 64 GiB RAM and 400 GiB free
+disk. `ALLOW_UNDERSIZED_BUILD=1` is an explicit operator override, not a claim
+that a smaller host is reliable. The running rig uses far less space and RAM.
 
 ### Speed levers (all verified accepted by qemu 11.0.2, MTTCG confirmed active)
 
@@ -79,38 +94,71 @@ matters only for the clean unpinned baseline.
 
 ## Deploy (the `lab` entrypoint)
 
-`avd/lab` gives a pentester one command per backend. Pick by what you test:
+`avd/lab` gives a pentester one command per backend. The qemu delivery gate is:
 
 ```
-lab qemu provision   # one-time: fetch LineageOS arm64, convert, apply the
-                     #           rooted-ready byte patches (permissive + debuggable
-                     #           + adb.secure=0). Produces vda.raw.
-lab qemu up          # boot headless (fast-TCG). ~4 min first boot.
-lab qemu root        # root adb shell: uid=0, aarch64, Permissive
-lab qemu ca [pem]    # install a CA (default mitmproxy) for TLS decrypt
-lab qemu shell       # adb shell
-lab qemu status | down
+./avd/lab qemu up
+./avd/lab qemu root
+./avd/lab qemu check
+./avd/lab qemu install --abi arm64-v8a <X.apkm>
+./avd/lab qemu install --abi armeabi-v7a <Instagram.apkm>
+./avd/lab qemu accept <X.apkm> <Instagram.apkm>
+./avd/lab qemu status
+./avd/lab qemu down
 
-lab avd provision    # x86_64 Google-APIs image + AVD (KVM, adb-rootable)
-lab avd up | root | ca | shell | status | down
+./avd/lab avd provision    # separate x86_64 Google-APIs/KVM lane
+./avd/lab avd up | root | shell | status | down
 ```
 
-- **qemu backend**: REAL aarch64. Use it for mempatch / HWBP (the arm64-only
-  primitives). Rooting is scripted in `provision.sh` + `adb-root.sh`: two 1-byte
+`check` fails closed unless the same live device is Android 16/API 36, rooted,
+permissive, `zygote64_32`, exposes both ABI lists, both app-process binaries,
+both runtime linkers, and `CONFIG_COMPAT` (or a successful 32-bit linker probe).
+
+`accept` validates each supplied APKM's `info.json`, version, package identity,
+native ABI and exact selected splits before device access. It records both
+bundle SHA-256 hashes, installs through `avd/install-app.sh` with explicit ABIs,
+and verifies installed `versionCode`, `primaryCpuAbi`, and sorted `pm path`
+basenames. It resolves the currently enabled launcher instead of assuming an
+activity name, uses `am start -W`, and requires two stable observations of the
+main PID and executable. X must resolve to `/system/bin/app_process64` and
+Instagram to `/system/bin/app_process32`. Controlled logcat output must contain
+no `INSTALL_FAILED_NO_MATCHING_ABIS`, `UnsatisfiedLinkError`, or `CANNOT LINK
+EXECUTABLE` result, and the boot ID is checked after each launch and again at the
+end.
+
+The acceptance command reinstalls with `-r` and does not uninstall or clear either package,
+preserving pentester account state. It force-stops only the app being launched.
+A 32-bit process proof is deliberately narrower than TLS instrumentation.
+32-bit declaw instrumentation is still a separate limitation because today's
+mempatch, HWBP, and mempoke helpers are ARM64-only.
+
+- **qemu backend**: native ARM guest ISA through TCG. Use its ARM64 processes for
+  current mempatch / HWBP primitives. Rooting is scripted in `provision.sh` +
+  `adb-root.sh`: two 1-byte
   patches (ro.debuggable=1, ro.adb.secure=0) in the ext4 system, plus
   androidboot.selinux=permissive in vendor_boot. No Magisk.
 - **avd backend**: x86_64, KVM-fast. Use it for OkHttp / NSC / static-Flutter
   patch testing. arm apps run under ndk-translation; the arm64-native primitives
   do NOT run here.
 
-## Status
+## Delivery status
 
-- [x] Local qemu arm64 rig boots real Android 16, MTTCG verified across P-cores.
+- [x] Reproducible `virtio_arm64` multilib build/provision path pins its source
+      inputs and records metadata, manifests, and hashes.
+- [x] Runtime gate covers Android 16, root, permissive SELinux, `zygote64_32`,
+      both ABI lists/runtimes, and kernel compatibility.
+- [x] Device-free acceptance tests cover bundle identity/ABI, version and split
+      binding, launcher resolution, process executable, linker errors, installer
+      failure, missing PID, and changed boot ID.
+- [ ] Live release proof remains the final generated-artifact gate: run the two
+      supplied production APKMs through `lab qemu accept` after the multilib
+      image finishes building.
+- [x] The prior local qemu arm64-only rig booted Android 16 with MTTCG across P-cores.
 - [x] Root confirmed: `uid=0`, aarch64, Android 16, SELinux Permissive. Boot ~250s.
       Verified declaw-ready: another proc's /proc/pid/mem writable, arm64
       BoringSSL at /apex/com.android.conscrypt/lib64/libssl.so.
 - [x] Packaged as `avd/lab` (qemu + avd backends) + `avd/provision.sh`. Both
       backends verified live: `lab qemu status` -> uid=0 aarch64 Permissive;
       `lab avd status` -> uid=0 Android 13 x86_64. provision patch logic unit-verified.
-- [ ] mempatch decryption proof against a native-pinning app (cronet). Needs the
-      per-build ssl_verify_peer_cert offset (RE / friTap) + cronet interception.
+- [x] ARM64 mempatch decryption was proven separately against pinned conscrypt/X.
+      That does not claim support for an ARMv7 target process.

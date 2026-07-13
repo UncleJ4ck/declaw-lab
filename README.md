@@ -1,8 +1,9 @@
 # declaw-lab
 
-A rooted Android you deploy in one command to test [declaw](https://github.com/UncleJ4ck/declaw):
-run a patched app, exercise declaw's arm64 primitives, and watch the decrypted traffic. Two
-backends, an interactive window, no cert install on the device.
+A rooted Android lab for testing [declaw](https://github.com/UncleJ4ck/declaw):
+run ARM64 and ARM32 production apps in one Android 16 guest, exercise declaw's
+ARM64 primitives, and watch decrypted traffic. Two backends, an interactive
+window, no cert install on the device.
 
 ## Backends: pick your device
 
@@ -12,42 +13,51 @@ lab <backend> <command>          # from ./avd/lab
 
 | Backend | Device | Speed | Root | Use it for |
 |---|---|---|---|---|
-| **qemu** | REAL aarch64 Android 16 (qemu-system-aarch64, TCG) | ~4 min boot | uid 0 | declaw's arm64-only primitives: mempatch, HWBP |
+| **qemu** | Android 16 `virtio_arm64`, `zygote64_32` (QEMU TCG) | ~4 min boot | uid 0 | Native ARM64 + ARMv7 apps in one guest; ARM64 mempatch/HWBP |
 | **avd** | x86_64 Android 13 (Google emulator, KVM) | fast | uid 0 | OkHttp / NSC / static-Flutter-patch testing |
 
-The qemu backend is the only one that runs REAL arm64. No hypervisor accelerates a foreign
-ISA on an x86 host, so it is a software CPU (TCG) tuned as hard as it goes: MTTCG across the
-P-cores, `pauth-impdef`, `virtio-gpu-gl` blob, and byte patches that make it boot rooted and
-permissive. See `docs/arm64-testing.md` for the full story.
+The qemu backend executes the AArch64 and AArch32 guest instruction sets directly
+through `qemu-system-aarch64`; it is not an x86 Android image plus Native Bridge.
+On an x86 host the CPU implementation is necessarily QEMU TCG software translation,
+not physical ARM silicon or KVM. It is tuned with MTTCG, `pauth-impdef`, and a large
+translation-block cache. See `docs/arm64-testing.md` for the exact boundary.
 
 ## Quick start
 
-One-time per backend, fetch and prepare the image:
+The qemu image is a reproducible local LineageOS build. Keep the checkout and all
+build work under this clone:
 
 ```bash
-cd avd
-./lab qemu provision     # real arm64: LineageOS, rooted-ready patches
-./lab avd provision      # x86_64: Google-APIs image + AVD
+BUILD_ROOT=$PWD/.lineage-multilib-build ./avd/build-lineage-multilib.sh
+BUILD_ROOT=$PWD/.lineage-multilib-build ./avd/lab qemu provision
+./avd/lab avd provision  # separate x86_64 Google-APIs image + AVD
 ```
+
+The build produces `UTM-VM-*-virtio_arm64.zip`, `build-metadata.txt`, and
+`SHA256SUMS` together under `.lineage-multilib-build/dist/`. Provisioning copies
+those inputs once, verifies the exact `lineage-23.2` / `virtio_arm64` /
+`zygote64_32` contract and both checksums, then atomically publishes the patched
+rig at `$HOME/Android/lineage-multilib`. It refuses `virtio_arm64only` and does
+not replace an existing rig.
 
 Then just name the backend. With no command it boots (if needed), roots, opens the
 interactive window, and drops you in a root shell:
 
 ```bash
-./lab qemu               # -> real aarch64 device, UI window + root shell
-./lab avd                # -> x86_64 device, UI window + root shell
-./lab                    # -> defaults to qemu
+./avd/lab qemu            # -> ARM multilib guest, UI window + root shell
+./avd/lab avd             # -> x86_64 device, UI window + root shell
+./avd/lab                 # -> defaults to qemu
 ```
 
-The device and window stay up when you leave the shell; `./lab <backend> down` stops it.
+The device and window stay up when you leave the shell; `./avd/lab <backend> down` stops it.
 
 Decrypt an app's HTTPS into Burp with one command. Start Burp (its default proxy
 listener is enough), then pass the app straight to `lab`:
 
 ```bash
-./lab ~/app-patched.apk           # boot + install + send its HTTPS to Burp + UI window
-./lab com.the.app                 # same for an app already installed
-./lab avd ~/app-patched.apk       # same on the x86_64 emulator
+./avd/lab ~/app-patched.apk           # boot + install + send HTTPS to Burp + UI
+./avd/lab com.the.app                 # same for an app already installed
+./avd/lab avd ~/app-patched.apk       # same on the x86_64 emulator
 ```
 
 A bare apk or package is the pentest one-liner: it boots the device if needed, installs
@@ -57,8 +67,8 @@ and forwards it into Burp. **There is no device CA to install** (that is the who
 declaw is what makes the app accept the cert). Unpatched apps reject it, which is the
 negative control.
 
-Burp: point elsewhere with `BURP=host:port ./lab ...`, or `BURP= ./lab ...` to skip Burp
-and only write `capture/traffic.log`.
+Burp: point elsewhere with `BURP=host:port ./avd/lab ...`, or
+`BURP= ./avd/lab ...` to skip Burp and only write `capture/traffic.log`.
 
 ## Commands
 
@@ -69,25 +79,62 @@ default, so most sessions are just `lab <apk>`:
 (nothing)   boot (if needed) + root + UI window + root shell   [the default]
 APK | PKG   boot + install (apk) + send that app's HTTPS to Burp + UI   [pentest one-liner]
 capture [X] the same, explicit. X = .apk to install, package to scope, or nothing for all apps
+check       prove Android 16, zygote64_32, both ABI lists/runtimes, root and CONFIG_COMPAT
+install [--abi ABI] APP  capability-check, then install an APK/APKM/XAPK/split directory
+accept X I  install and launch X as ARM64 and Instagram as ARM32 in the same qemu boot
 probe P L O confirm L@O is the LIVE ssl_verify_peer_cert in pkg P (BRK; you drive 1 request)
-provision   one-time: fetch + prepare a rooted-ready image
+provision   verify the local multilib build + prepare a rooted-ready image
 up root shell ui   the individual steps (all folded into the default)
 status      uid / android version / arch / selinux
 down        stop (also stops the MITM)
 ```
 
+## Prove both production app architectures
+
+Run the capability gate first, then install either ABI explicitly when working
+with an individual bundle:
+
+```bash
+./avd/lab qemu check
+./avd/lab qemu install --abi arm64-v8a <X.apkm>
+./avd/lab qemu install --abi armeabi-v7a <Instagram.apkm>
+```
+
+The release gate does both in one boot:
+
+```bash
+./avd/lab qemu accept <X.apkm> <Instagram.apkm>
+```
+
+It validates each APKMirror `info.json`, hashes the bundle, records the exact
+selected split names, installs with the production installer, and binds the
+installed `versionCode`, `primaryCpuAbi`, and `pm path` split basenames back to
+that bundle. It resolves each enabled launcher dynamically, launches with
+`am start -W`, then requires a stable main PID whose executable is
+`/system/bin/app_process64` for X and `/system/bin/app_process32` for Instagram.
+The boot ID must remain unchanged throughout. The gate only performs reinstall
+in place (`-r`); it never uninstalls or clears packages, so existing accounts are
+preserved.
+
 ## What you bring
 
-- To test declaw's arm64 primitives (mempatch, HWBP): nothing but the `qemu` backend. It is
-  a real rooted aarch64 device with BoringSSL loaded, which is exactly what those need.
+- To test declaw's ARM64 primitives (mempatch, HWBP): use the `qemu` backend.
+  It is a rooted AArch64 guest with BoringSSL loaded.
+- To verify an ARMv7 build installs and launches: use `qemu install --abi
+  armeabi-v7a` or the dual-app acceptance gate. Current declaw mempatch/HWBP
+  helpers remain ARM64-only; proving the 32-bit process does not imply 32-bit TLS
+  instrumentation support.
 - To test a patched app end to end: the APK you ran through declaw. `adb install` it on the
   running backend, point capture at it, drive it from the `ui` window.
 
 ## Requirements
 
 - Linux x86_64 host, `adb` in PATH.
-- qemu backend: `qemu-system-aarch64` (11.x), `edk2-aarch64` firmware, `parted`, `socat`,
-  `python3`, `curl`. About 6 GB disk for the image.
+- Building qemu: the script preflights the AOSP recommendation of 64 GB RAM and
+  400 GiB free disk plus all required LineageOS host tools. The generated rig is
+  much smaller, but source compilation needs the build capacity.
+- Running qemu: `qemu-system-aarch64` (11.x), `edk2-aarch64` firmware,
+  `parted`, `socat`, `python3`, and `adb`.
 - avd backend: the Android SDK bits are fetched by `lab avd provision` (needs a JDK 17+).
 - `ui`: `scrcpy` (a distro package, or the bundled x86_64 prebuilt is fetched on first use).
 
@@ -108,8 +155,12 @@ No Magisk.
 ## Files
 
 - `avd/lab` the entrypoint (both backends).
-- `avd/provision.sh` fetch + rooted-ready disk prep (qemu).
+- `avd/build-lineage-multilib.sh` pinned LineageOS 23.2 `virtio_arm64` build.
+- `avd/provision.sh` verifies the builder sidecars and creates the rooted-ready disk.
 - `avd/boot-arm64.sh` the tuned qemu-system-aarch64 boot.
+- `avd/check-multilib.sh` fail-closed live ARM32 + ARM64 runtime gate.
+- `avd/install-app.sh` ABI-aware APK/APKM/XAPK/split installer.
+- `tests/accept_multilib_apps.sh` one-boot X + Instagram process proof.
 - `avd/adb-root.sh` root the running qemu backend.
 - `avd/install-ca.sh` install a CA into the Android 14+ conscrypt APEX store.
 - `avd/setup.sh` fetch the Android SDK + a system image.

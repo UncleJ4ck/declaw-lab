@@ -112,6 +112,94 @@ case "$command" in
       "uname -m") echo aarch64 ;;
       "id -u") echo 0 ;;
       getenforce) echo Permissive ;;
+      "cat /proc/sys/kernel/random/boot_id")
+        if [[ $profile != accept ]]; then
+          echo "fake adb: boot_id is only available in the accept profile" >&2
+          exit 95
+        fi
+        calls_file=${FAKE_ACCEPT_BOOT_CALLS_FILE:-}
+        calls=0
+        if [[ -n $calls_file && -f $calls_file ]]; then
+          read -r calls <"$calls_file"
+        fi
+        ((calls += 1))
+        if [[ -n $calls_file ]]; then
+          printf '%s\n' "$calls" >"$calls_file"
+        fi
+        if [[ ${FAKE_ACCEPT_CHANGE_BOOT_AFTER:-999} -lt $calls ]]; then
+          echo 22222222-2222-2222-2222-222222222222
+        else
+          echo 11111111-1111-1111-1111-111111111111
+        fi
+        ;;
+      "dumpsys package com.twitter.android")
+        [[ $profile == accept ]] || exit 95
+        printf '  versionCode=%s minSdk=24 targetSdk=36\n' \
+          "${FAKE_ACCEPT_X_VERSION:-312020200}"
+        printf '  primaryCpuAbi=%s\n' "${FAKE_ACCEPT_X_ABI:-arm64-v8a}"
+        ;;
+      "dumpsys package com.instagram.android")
+        [[ $profile == accept ]] || exit 95
+        printf '  versionCode=%s minSdk=24 targetSdk=36\n' \
+          "${FAKE_ACCEPT_INSTAGRAM_VERSION:-383611189}"
+        printf '  primaryCpuAbi=%s\n' \
+          "${FAKE_ACCEPT_INSTAGRAM_ABI:-armeabi-v7a}"
+        ;;
+      "pm path com.twitter.android")
+        [[ $profile == accept ]] || exit 95
+        IFS=, read -r -a splits <<< \
+          "${FAKE_ACCEPT_X_SPLITS:-base.apk,split_config.arm64_v8a.apk,split_config.en.apk}"
+        for split in "${splits[@]}"; do
+          printf 'package:/data/app/com.twitter.android/%s\n' "$split"
+        done
+        ;;
+      "pm path com.instagram.android")
+        [[ $profile == accept ]] || exit 95
+        IFS=, read -r -a splits <<< \
+          "${FAKE_ACCEPT_INSTAGRAM_SPLITS:-base.apk,split_config.en.apk}"
+        for split in "${splits[@]}"; do
+          printf 'package:/data/app/com.instagram.android/%s\n' "$split"
+        done
+        ;;
+      "cmd package resolve-activity --brief --components --user 0 -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -p com.twitter.android")
+        [[ $profile == accept ]] || exit 95
+        echo "${FAKE_ACCEPT_X_COMPONENT:-com.twitter.android/.StartActivity}"
+        ;;
+      "cmd package resolve-activity --brief --components --user 0 -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -p com.instagram.android")
+        [[ $profile == accept ]] || exit 95
+        echo "${FAKE_ACCEPT_INSTAGRAM_COMPONENT:-com.instagram.android/.MainActivity}"
+        ;;
+      "am force-stop com.twitter.android"|"am force-stop com.instagram.android")
+        [[ $profile == accept ]] || exit 95
+        ;;
+      "am start -W -n com.twitter.android/.StartActivity"|\
+      "am start -W -n com.instagram.android/.MainActivity")
+        [[ $profile == accept ]] || exit 95
+        echo "Status: ok"
+        ;;
+      "logcat -c")
+        [[ $profile == accept ]] || exit 95
+        ;;
+      "logcat -d -v brief")
+        [[ $profile == accept ]] || exit 95
+        printf '%s\n' "${FAKE_ACCEPT_LOGCAT:-I/ActivityTaskManager: Displayed activity}"
+        ;;
+      "pidof com.twitter.android")
+        [[ $profile == accept ]] || exit 95
+        [[ ${FAKE_ACCEPT_MISSING_PID:-} != com.twitter.android ]] && echo 6401
+        ;;
+      "pidof com.instagram.android")
+        [[ $profile == accept ]] || exit 95
+        [[ ${FAKE_ACCEPT_MISSING_PID:-} != com.instagram.android ]] && echo 3201
+        ;;
+      "readlink /proc/6401/exe")
+        [[ $profile == accept ]] || exit 95
+        echo "${FAKE_ACCEPT_X_EXE:-/system/bin/app_process64}"
+        ;;
+      "readlink /proc/3201/exe")
+        [[ $profile == accept ]] || exit 95
+        echo "${FAKE_ACCEPT_INSTAGRAM_EXE:-/system/bin/app_process32}"
+        ;;
       *CONFIG_COMPAT*)
         case $profile in
           disabled-config) echo "# CONFIG_COMPAT is not set" ;;
@@ -145,7 +233,7 @@ case "$command" in
     esac
     if [[ -n $path ]]; then
       case "$profile:$path" in
-        multilib:/system/bin/app_process64|multilib:/apex/com.android.runtime/bin/linker64|multilib:/system/bin/app_process32|multilib:/apex/com.android.runtime/bin/linker|disabled-config:/system/bin/app_process64|disabled-config:/apex/com.android.runtime/bin/linker64|disabled-config:/system/bin/app_process32|disabled-config:/apex/com.android.runtime/bin/linker|unreadable-config:/system/bin/app_process64|unreadable-config:/apex/com.android.runtime/bin/linker64|unreadable-config:/system/bin/app_process32|unreadable-config:/apex/com.android.runtime/bin/linker|unreadable-no-probe:/system/bin/app_process64|unreadable-no-probe:/apex/com.android.runtime/bin/linker64|unreadable-no-probe:/system/bin/app_process32|unreadable-no-probe:/apex/com.android.runtime/bin/linker)
+        multilib:/system/bin/app_process64|multilib:/apex/com.android.runtime/bin/linker64|multilib:/system/bin/app_process32|multilib:/apex/com.android.runtime/bin/linker|accept:/system/bin/app_process64|accept:/apex/com.android.runtime/bin/linker64|accept:/system/bin/app_process32|accept:/apex/com.android.runtime/bin/linker|disabled-config:/system/bin/app_process64|disabled-config:/apex/com.android.runtime/bin/linker64|disabled-config:/system/bin/app_process32|disabled-config:/apex/com.android.runtime/bin/linker|unreadable-config:/system/bin/app_process64|unreadable-config:/apex/com.android.runtime/bin/linker64|unreadable-config:/system/bin/app_process32|unreadable-config:/apex/com.android.runtime/bin/linker|unreadable-no-probe:/system/bin/app_process64|unreadable-no-probe:/apex/com.android.runtime/bin/linker64|unreadable-no-probe:/system/bin/app_process32|unreadable-no-probe:/apex/com.android.runtime/bin/linker)
           echo executable
           ;;
         arm64only:/system/bin/app_process64|arm64only:/apex/com.android.runtime/bin/linker64)
