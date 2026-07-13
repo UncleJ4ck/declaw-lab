@@ -32,6 +32,8 @@ REPO_LAUNCHER=$TOOLS_DIR/repo
 BUILD_GIT_CONFIG_GLOBAL=$BUILD_ROOT/gitconfig
 BUILD_TIMESTAMP=${BUILD_TIMESTAMP:-$(date -u +%Y%m%dT%H%M%SZ)}
 DIST_DIR=${BUILD_DIST_DIR:-$BUILD_ROOT/dist/${BUILD_TIMESTAMP}-${LINEAGE_TARGET}}
+BUILD_JOBS=${BUILD_JOBS:-}
+BUILD_TMP_DIR=${BUILD_TMP_DIR:-$BUILD_ROOT/tmp}
 
 die() {
   echo "[build] ERROR: $*" >&2
@@ -42,6 +44,41 @@ is_uint() {
   [[ $1 =~ ^[0-9]+$ ]]
 }
 
+default_build_jobs() {
+  local cpus
+  if [[ ${BUILD_TEST_MODE:-0} == 1 && -n ${BUILD_TEST_NPROC:-} ]]; then
+    cpus=$BUILD_TEST_NPROC
+  else
+    cpus=$(nproc)
+  fi
+  is_uint "$cpus" && ((cpus > 0)) || die "could not determine a positive CPU count"
+  if ((cpus > 4)); then
+    cpus=4
+  fi
+  printf '%s\n' "$cpus"
+}
+
+validate_build_settings() {
+  local normalized_tmp
+  if [[ -z $BUILD_JOBS ]]; then
+    BUILD_JOBS=$(default_build_jobs)
+  fi
+  is_uint "$BUILD_JOBS" && ((BUILD_JOBS > 0)) || \
+    die "BUILD_JOBS must be a positive integer"
+
+  [[ $BUILD_TMP_DIR == /* ]] || \
+    die "BUILD_TMP_DIR must be an absolute non-root path"
+  normalized_tmp=$(readlink -m -- "$BUILD_TMP_DIR")
+  [[ $normalized_tmp != / ]] || \
+    die "BUILD_TMP_DIR must be an absolute non-root path"
+  BUILD_TMP_DIR=$normalized_tmp
+}
+
+activate_build_tmp() {
+  mkdir -p -- "$BUILD_ROOT" "$BUILD_TMP_DIR"
+  export TMPDIR=$BUILD_TMP_DIR
+}
+
 print_contract() {
   echo "[build] branch=$LINEAGE_BRANCH target=$LINEAGE_TARGET variant=$LINEAGE_VARIANT"
   echo "[build] abis=$LINEAGE_ABIS zygote=$LINEAGE_ZYGOTE"
@@ -50,11 +87,13 @@ print_contract() {
   echo "[build] repo=$REPO_LAUNCHER_URL sha256=$REPO_LAUNCHER_SHA256"
   echo "[build] root=$BUILD_ROOT"
   echo "[build] dist=$DIST_DIR"
+  echo "[build] jobs=$BUILD_JOBS tmp=$BUILD_TMP_DIR"
 }
 
 print_build_commands() {
   echo "export PATH=$TOOLS_DIR:\$PATH"
   echo "export GIT_CONFIG_GLOBAL=$BUILD_GIT_CONFIG_GLOBAL"
+  echo "export TMPDIR=$BUILD_TMP_DIR"
   echo "git lfs install --skip-repo"
   echo "git config --global user.name \"$BUILDER_GIT_NAME\""
   echo "git config --global user.email \"$BUILDER_GIT_EMAIL\""
@@ -64,7 +103,7 @@ print_build_commands() {
   echo "export ROOMSERVICE_BRANCHES=\"$ROOMSERVICE_BRANCHES_VALUE\""
   echo "source $SOURCE_DIR/build/envsetup.sh"
   echo "breakfast $LINEAGE_TARGET $LINEAGE_VARIANT"
-  echo "m vm-utm-zip otapackage"
+  echo "m -j$BUILD_JOBS vm-utm-zip otapackage"
 }
 
 required_tools() {
@@ -304,7 +343,7 @@ build_target() {
     set -u
     breakfast "$LINEAGE_TARGET" "$LINEAGE_VARIANT"
     clean_target_artifacts "$SOURCE_DIR/out/target/product/$LINEAGE_TARGET"
-    m vm-utm-zip otapackage
+    m -j"$BUILD_JOBS" vm-utm-zip otapackage
   )
 }
 
@@ -398,6 +437,7 @@ emit_dist() {
 }
 
 main() {
+  validate_build_settings
   print_contract
   if [[ ${BUILD_DRY_RUN:-0} == 1 ]]; then
     print_build_commands
@@ -410,7 +450,7 @@ main() {
     return 0
   fi
 
-  mkdir -p -- "$BUILD_ROOT"
+  activate_build_tmp
   configure_git_lfs
   prepare_builder_snapshot
   install_repo_launcher

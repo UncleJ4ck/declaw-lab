@@ -734,17 +734,20 @@ test_build() {
   local tmp bin log output status root dist product utm_dir valid_utm valid_ota
   local tools modules preflight_bin git_home git_root gitconfig home_hash
   local cleanup_product cleanup_utm unsafe_product source_dir tools_dir host_bin build_log
+  local build_tmp override_tmp invalid_job invalid_tmp preflight_tmp
   tmp=$(mktemp -d)
   bin="$tmp/bin"
   log="$tmp/network.log"
   root="$tmp/build root"
   dist="$tmp/dist output"
+  build_tmp="$root/tmp"
   trap 'rm -rf "$tmp"' RETURN
   : >"$log"
   make_build_fakes "$bin"
 
   set +e
   output=$(PATH="$bin:/usr/bin:/bin" FAKE_BUILD_NETWORK_LOG="$log" \
+    BUILD_TEST_MODE=1 BUILD_TEST_NPROC=16 \
     BUILD_DRY_RUN=1 BUILD_ROOT="$root" BUILD_DIST_DIR="$dist" \
     BUILD_TIMESTAMP=20260713T120000Z \
     "$ROOT/avd/build-lineage-multilib.sh" 2>&1)
@@ -766,8 +769,10 @@ test_build() {
     "[build] repo=https://storage.googleapis.com/git-repo-downloads/repo-2.54 sha256=6cba294d6218bbd4a1500598207b3979c752c7a122aef9429e4d7fef688833b5"
   assert_line "$output" "[build] root=$root"
   assert_line "$output" "[build] dist=$dist"
+  assert_line "$output" "[build] jobs=4 tmp=$build_tmp"
   assert_line "$output" 'export PATH='"$root/tools"':$PATH'
   assert_line "$output" "export GIT_CONFIG_GLOBAL=$root/gitconfig"
+  assert_line "$output" "export TMPDIR=$build_tmp"
   assert_line "$output" "git lfs install --skip-repo"
   assert_line "$output" 'git config --global user.name "Declaw Multilib Builder"'
   assert_line "$output" 'git config --global user.email "declaw-builder@localhost"'
@@ -779,12 +784,50 @@ test_build() {
     'export ROOMSERVICE_BRANCHES="lineage-23.1 lineage-23.0"'
   assert_line "$output" "source $root/source/build/envsetup.sh"
   assert_line "$output" "breakfast virtio_arm64 user"
-  assert_line "$output" "m vm-utm-zip otapackage"
+  assert_line "$output" "m -j4 vm-utm-zip otapackage"
   if grep -Eqi 'arm64only|(^|[^[:alnum:]_])x86([^[:alnum:]_]|$)|kvm|native.?bridge' <<<"$output"; then
     printf '%s\n' "$output" >&2
     fail "builder dry run emitted a forbidden target, accelerator, or translation layer"
   fi
   [[ ! -s $log ]] || fail "builder dry run invoked a network/source command"
+  [[ ! -e $build_tmp ]] || fail "builder dry run created BUILD_TMP_DIR"
+
+  override_tmp="$tmp/dedicated temp"
+  output=$(PATH="$bin:/usr/bin:/bin" FAKE_BUILD_NETWORK_LOG="$log" \
+    BUILD_DRY_RUN=1 BUILD_ROOT="$root" BUILD_DIST_DIR="$dist" \
+    BUILD_JOBS=2 BUILD_TMP_DIR="$override_tmp" \
+    "$ROOT/avd/build-lineage-multilib.sh")
+  assert_line "$output" "[build] jobs=2 tmp=$override_tmp"
+  assert_line "$output" "export TMPDIR=$override_tmp"
+  assert_line "$output" "m -j2 vm-utm-zip otapackage"
+  [[ ! -e $override_tmp ]] || fail "builder dry run created overridden BUILD_TMP_DIR"
+
+  for invalid_job in 0 -1 nope 1.5; do
+    set +e
+    output=$(PATH="$bin:/usr/bin:/bin" FAKE_BUILD_NETWORK_LOG="$log" \
+      BUILD_DRY_RUN=1 BUILD_ROOT="$root" BUILD_JOBS="$invalid_job" \
+      "$ROOT/avd/build-lineage-multilib.sh" 2>&1)
+    status=$?
+    set -e
+    [[ $status -eq 2 ]] || \
+      fail "BUILD_JOBS=$invalid_job returned $status, expected 2"
+    grep -Fq -- "BUILD_JOBS must be a positive integer" <<<"$output" || \
+      fail "invalid BUILD_JOBS=$invalid_job omitted the validation error"
+  done
+
+  for invalid_tmp in / // relative/tmp; do
+    set +e
+    output=$(PATH="$bin:/usr/bin:/bin" FAKE_BUILD_NETWORK_LOG="$log" \
+      BUILD_DRY_RUN=1 BUILD_ROOT="$root" BUILD_TMP_DIR="$invalid_tmp" \
+      "$ROOT/avd/build-lineage-multilib.sh" 2>&1)
+    status=$?
+    set -e
+    [[ $status -eq 2 ]] || \
+      fail "BUILD_TMP_DIR=$invalid_tmp returned $status, expected 2"
+    grep -Fq -- "BUILD_TMP_DIR must be an absolute non-root path" <<<"$output" || \
+      fail "unsafe BUILD_TMP_DIR=$invalid_tmp omitted the validation error"
+  done
+  [[ ! -s $log ]] || fail "resource-setting validation reached git/curl/repo"
 
   tools=$(bash -c 'source "$1"; required_tools' \
     build-tools-test "$ROOT/avd/build-lineage-multilib.sh")
@@ -956,7 +999,8 @@ SH
   chmod +x "$tools_dir/repo" "$host_bin/repo"
   cat >"$source_dir/build/envsetup.sh" <<'SH'
 breakfast() {
-  printf 'breakfast\t%s\trepo=%s\n' "$*" "$(command -v repo)" >>"$FAKE_BUILD_TARGET_LOG"
+  printf 'breakfast\t%s\trepo=%s\ttmp=%s\n' \
+    "$*" "$(command -v repo)" "$TMPDIR" >>"$FAKE_BUILD_TARGET_LOG"
   mkdir -p "$FAKE_BUILD_PRODUCT/VirtualMachine/UTM"
   : >"$FAKE_BUILD_PRODUCT/lineage_virtio_arm64-ota.zip"
   : >"$FAKE_BUILD_PRODUCT/VirtualMachine/UTM/UTM-VM-stale-virtio_arm64.zip"
@@ -967,25 +1011,37 @@ m() {
   [[ ! -e $FAKE_BUILD_PRODUCT/lineage_virtio_arm64-ota.zip ]] || return 91
   [[ ! -e $FAKE_BUILD_PRODUCT/VirtualMachine/UTM/UTM-VM-stale-virtio_arm64.zip ]] || return 92
   [[ -e $FAKE_BUILD_PRODUCT/VirtualMachine/UTM/UTM-VM-keep-virtio_arm64only.zip ]] || return 93
-  printf 'm\t%s\trepo=%s\n' "$*" "$(command -v repo)" >>"$FAKE_BUILD_TARGET_LOG"
+  printf 'm\t%s\trepo=%s\ttmp=%s\n' \
+    "$*" "$(command -v repo)" "$TMPDIR" >>"$FAKE_BUILD_TARGET_LOG"
   repo from-build
 }
 SH
   PATH="$host_bin:/usr/bin:/bin" BUILD_ROOT="$tmp/build-target" \
+    BUILD_JOBS=3 BUILD_TMP_DIR="$tmp/build-target/tmp" \
     LINEAGE_SOURCE_DIR="$source_dir" BUILD_TOOLS_DIR="$tools_dir" \
     FAKE_BUILD_PRODUCT="$source_dir/out/target/product/virtio_arm64" \
     FAKE_BUILD_TARGET_LOG="$build_log" bash -c \
-    'source "$1"; build_target' build-target-test \
+    'source "$1"; validate_build_settings; activate_build_tmp; build_target' build-target-test \
     "$ROOT/avd/build-lineage-multilib.sh"
-  grep -Fq -- $'breakfast\tvirtio_arm64 user\trepo='"$tools_dir/repo" "$build_log" || \
+  grep -Fq -- $'breakfast\tvirtio_arm64 user\trepo='"$tools_dir/repo"$'\ttmp='"$tmp/build-target/tmp" "$build_log" || \
     fail "breakfast did not resolve repo from the pinned tools directory"
-  grep -Fq -- $'m\tvm-utm-zip otapackage\trepo='"$tools_dir/repo" "$build_log" || \
-    fail "build did not resolve repo from the pinned tools directory"
+  grep -Fq -- $'m\t-j3 vm-utm-zip otapackage\trepo='"$tools_dir/repo"$'\ttmp='"$tmp/build-target/tmp" "$build_log" || \
+    fail "build did not use bounded jobs, pinned repo, and BUILD_TMP_DIR"
+  [[ -d $tmp/build-target/tmp ]] || fail "active build did not create BUILD_TMP_DIR"
   assert_line "$(grep '^pinned-repo' "$build_log")" $'pinned-repo\tfrom-breakfast'
   assert_line "$(grep '^pinned-repo' "$build_log")" $'pinned-repo\tfrom-build'
   if grep -Fq HOST-REPO "$build_log"; then
     fail "build/Roomservice invoked a host repo instead of the pinned launcher"
   fi
+
+  : >"$log"
+  preflight_tmp="$tmp/preflight-only-tmp"
+  output=$(FAKE_BUILD_NETWORK_LOG="$log" BUILD_TMP_DIR="$preflight_tmp" \
+    run_build_preflight "$bin" 400 64 2>&1)
+  grep -Fq -- "[build] preflight-only: PASS" <<<"$output" || \
+    fail "preflight-only resource test did not pass"
+  [[ ! -e $preflight_tmp ]] || fail "preflight-only mode created BUILD_TMP_DIR"
+  [[ ! -s $log ]] || fail "preflight-only resource test reached git/curl/repo"
 
   : >"$log"
   set +e
