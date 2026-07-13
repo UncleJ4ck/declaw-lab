@@ -9,6 +9,10 @@ readonly LINEAGE_ZYGOTE=zygote64_32
 readonly LINEAGE_MANIFEST_URL=https://github.com/LineageOS/android.git
 readonly AB_OTA_UPDATER_VALUE=false
 readonly ROOMSERVICE_BRANCHES_VALUE='lineage-23.1 lineage-23.0'
+readonly BUILDER_GIT_NAME='Declaw Multilib Builder'
+readonly BUILDER_GIT_EMAIL=declaw-builder@localhost
+readonly BUILDER_CHANGE_ID_KEY=Change-Id
+readonly QEMU_IMG_PATH=/usr/bin/qemu-img
 
 readonly BUILDER_REPO=https://github.com/jqssun/android-lineage-qemu.git
 readonly BUILDER_REF=v2026.07.09
@@ -24,7 +28,7 @@ BUILD_ROOT=${BUILD_ROOT:-$HOME/Android/lineage-multilib-build}
 SOURCE_DIR=${LINEAGE_SOURCE_DIR:-$BUILD_ROOT/source}
 BUILDER_DIR=${BUILDER_SNAPSHOT_DIR:-$BUILD_ROOT/builder-snapshot}
 TOOLS_DIR=${BUILD_TOOLS_DIR:-$BUILD_ROOT/tools}
-REPO_LAUNCHER=${REPO_LAUNCHER:-$TOOLS_DIR/repo}
+REPO_LAUNCHER=$TOOLS_DIR/repo
 BUILD_GIT_CONFIG_GLOBAL=$BUILD_ROOT/gitconfig
 BUILD_TIMESTAMP=${BUILD_TIMESTAMP:-$(date -u +%Y%m%dT%H%M%SZ)}
 DIST_DIR=${BUILD_DIST_DIR:-$BUILD_ROOT/dist/${BUILD_TIMESTAMP}-${LINEAGE_TARGET}}
@@ -49,8 +53,12 @@ print_contract() {
 }
 
 print_build_commands() {
+  echo "export PATH=$TOOLS_DIR:\$PATH"
   echo "export GIT_CONFIG_GLOBAL=$BUILD_GIT_CONFIG_GLOBAL"
   echo "git lfs install --skip-repo"
+  echo "git config --global user.name \"$BUILDER_GIT_NAME\""
+  echo "git config --global user.email \"$BUILDER_GIT_EMAIL\""
+  echo "git config --global trailer.changeid.key \"$BUILDER_CHANGE_ID_KEY\""
   echo "repo init -u $LINEAGE_MANIFEST_URL -b $LINEAGE_BRANCH --depth=1 --no-clone-bundle --git-lfs"
   echo "export AB_OTA_UPDATER=$AB_OTA_UPDATER_VALUE"
   echo "export ROOMSERVICE_BRANCHES=\"$ROOMSERVICE_BRANCHES_VALUE\""
@@ -61,15 +69,36 @@ print_build_commands() {
 
 required_tools() {
   local -a tools=(
-    awk bash bc bison chmod cp curl date df dirname find flex free g++ gcc
-    git git-lfs gperf grep java javac m4 make mkdir mktemp mv ninja nproc
-    perl pngcrush python3 readlink rsync sed sha256sum sort unzip xsltproc zip
+    awk bash bc bison ccache chmod cp curl date df dirname find flex free g++ gcc
+    git git-lfs glslangValidator gperf grep java javac lz4 lzop m4 make meson
+    mkdir mktemp mksquashfs mv ninja nproc perl pngcrush protoc python3 readlink
+    rsync schedtool sed sha256sum sort unzip xsltproc zip
   )
 
   if [[ ${BUILD_TEST_MODE:-0} == 1 && -n ${BUILD_TEST_REQUIRED_TOOLS:-} ]]; then
     read -r -a tools <<<"$BUILD_TEST_REQUIRED_TOOLS"
   fi
 
+  printf '%s\n' "${tools[@]}"
+}
+
+required_python_modules() {
+  printf '%s\n' yaml google.protobuf mako
+}
+
+required_qemu_img_path() {
+  if [[ ${BUILD_TEST_MODE:-0} == 1 && -n ${BUILD_TEST_QEMU_IMG_PATH:-} ]]; then
+    printf '%s\n' "$BUILD_TEST_QEMU_IMG_PATH"
+  else
+    printf '%s\n' "$QEMU_IMG_PATH"
+  fi
+}
+
+imagemagick_tools() {
+  local -a tools=(magick convert)
+  if [[ ${BUILD_TEST_MODE:-0} == 1 && -n ${BUILD_TEST_IMAGEMAGICK_TOOLS:-} ]]; then
+    read -r -a tools <<<"$BUILD_TEST_IMAGEMAGICK_TOOLS"
+  fi
   printf '%s\n' "${tools[@]}"
 }
 
@@ -111,7 +140,7 @@ available_ram_gib() {
 }
 
 preflight() {
-  local tool disk_gib ram_gib failed=0
+  local tool module qemu_img disk_gib ram_gib failed=0 imagemagick_found=0
 
   while IFS= read -r tool; do
     if ! command -v "$tool" >/dev/null 2>&1; then
@@ -119,6 +148,41 @@ preflight() {
       failed=1
     fi
   done < <(required_tools)
+
+  qemu_img=$(required_qemu_img_path)
+  if [[ ! -x $qemu_img ]]; then
+    echo "[build] ERROR: missing required executable: $qemu_img" >&2
+    failed=1
+  fi
+
+  while IFS= read -r tool; do
+    if command -v "$tool" >/dev/null 2>&1; then
+      imagemagick_found=1
+      break
+    fi
+  done < <(imagemagick_tools)
+  if ((imagemagick_found == 0)); then
+    echo "[build] ERROR: missing ImageMagick command (need magick or convert)" >&2
+    failed=1
+  fi
+
+  if [[ ! (${BUILD_TEST_MODE:-0} == 1 && \
+           ${BUILD_TEST_SKIP_PYTHON_MODULES:-0} == 1) ]] && \
+     command -v python3 >/dev/null 2>&1; then
+    while IFS= read -r module; do
+      if ! python3 - "$module" <<'PY'
+import importlib
+import sys
+
+importlib.import_module(sys.argv[1])
+PY
+      then
+        echo "[build] ERROR: missing required Python module: $module" >&2
+        failed=1
+      fi
+    done < <(required_python_modules)
+  fi
+
   ((failed == 0)) || exit 2
 
   disk_gib=$(available_disk_gib)
@@ -162,6 +226,15 @@ install_repo_launcher() {
 configure_git_lfs() {
   export GIT_CONFIG_GLOBAL=$BUILD_GIT_CONFIG_GLOBAL
   git lfs install --skip-repo
+  configure_git_identity
+}
+
+configure_git_identity() {
+  mkdir -p -- "$(dirname -- "$BUILD_GIT_CONFIG_GLOBAL")"
+  export GIT_CONFIG_GLOBAL=$BUILD_GIT_CONFIG_GLOBAL
+  git config --global user.name "$BUILDER_GIT_NAME"
+  git config --global user.email "$BUILDER_GIT_EMAIL"
+  git config --global trailer.changeid.key "$BUILDER_CHANGE_ID_KEY"
 }
 
 prepare_builder_snapshot() {
@@ -185,11 +258,34 @@ sync_sources() {
   mkdir -p -- "$SOURCE_DIR"
   (
     cd "$SOURCE_DIR"
-    "$REPO_LAUNCHER" init -u "$LINEAGE_MANIFEST_URL" -b "$LINEAGE_BRANCH" \
+    export PATH=$TOOLS_DIR:$PATH
+    repo init -u "$LINEAGE_MANIFEST_URL" -b "$LINEAGE_BRANCH" \
       --depth=1 --no-clone-bundle --git-lfs
-    "$REPO_LAUNCHER" sync --current-branch --no-tags --no-clone-bundle \
+    repo sync --current-branch --no-tags --no-clone-bundle \
       --optimized-fetch --prune -j"$jobs"
   )
+}
+
+clean_target_artifacts() {
+  local product_dir=$1 utm_dir path
+  local -a utm_artifacts=()
+  product_dir=${product_dir%/}
+  [[ -n $product_dir && ${product_dir##*/} == "$LINEAGE_TARGET" ]] || \
+    die "refusing artifact cleanup outside the $LINEAGE_TARGET product directory: $product_dir"
+  utm_dir=$product_dir/VirtualMachine/UTM
+
+  rm -f -- "$product_dir/lineage_${LINEAGE_TARGET}-ota.zip"
+  if [[ -d $utm_dir ]]; then
+    while IFS= read -r -d '' path; do
+      utm_artifacts+=("$path")
+    done < <(
+      find "$utm_dir" -maxdepth 1 -name "UTM-VM-*-${LINEAGE_TARGET}.zip" \
+        \( -type f -o -type l \) -print0
+    )
+  fi
+  if ((${#utm_artifacts[@]} > 0)); then
+    rm -f -- "${utm_artifacts[@]}"
+  fi
 }
 
 build_target() {
@@ -198,6 +294,7 @@ build_target() {
 
   (
     cd "$SOURCE_DIR"
+    export PATH=$TOOLS_DIR:$PATH
     export AB_OTA_UPDATER=$AB_OTA_UPDATER_VALUE
     export ROOMSERVICE_BRANCHES=$ROOMSERVICE_BRANCHES_VALUE
     # Android's envsetup is not guaranteed to be nounset-clean.
@@ -206,6 +303,7 @@ build_target() {
     source build/envsetup.sh
     set -u
     breakfast "$LINEAGE_TARGET" "$LINEAGE_VARIANT"
+    clean_target_artifacts "$SOURCE_DIR/out/target/product/$LINEAGE_TARGET"
     m vm-utm-zip otapackage
   )
 }

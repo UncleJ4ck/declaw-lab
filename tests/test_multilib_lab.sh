@@ -613,12 +613,16 @@ run_build_preflight() {
   shift 3
   PATH="$bin:/usr/bin:/bin" BUILD_TEST_MODE=1 \
     BUILD_TEST_REQUIRED_TOOLS=bash BUILD_TEST_DISK_GIB="$disk_gib" \
-    BUILD_TEST_RAM_GIB="$ram_gib" BUILD_PREFLIGHT_ONLY=1 \
+    BUILD_TEST_RAM_GIB="$ram_gib" BUILD_TEST_QEMU_IMG_PATH=/usr/bin/true \
+    BUILD_TEST_IMAGEMAGICK_TOOLS=true BUILD_TEST_SKIP_PYTHON_MODULES=1 \
+    BUILD_PREFLIGHT_ONLY=1 \
     "$ROOT/avd/build-lineage-multilib.sh" "$@"
 }
 
 test_build() {
   local tmp bin log output status root dist product utm_dir valid_utm valid_ota
+  local tools modules preflight_bin git_home git_root gitconfig home_hash
+  local cleanup_product cleanup_utm unsafe_product source_dir tools_dir host_bin build_log
   tmp=$(mktemp -d)
   bin="$tmp/bin"
   log="$tmp/network.log"
@@ -651,8 +655,12 @@ test_build() {
     "[build] repo=https://storage.googleapis.com/git-repo-downloads/repo-2.54 sha256=6cba294d6218bbd4a1500598207b3979c752c7a122aef9429e4d7fef688833b5"
   assert_line "$output" "[build] root=$root"
   assert_line "$output" "[build] dist=$dist"
+  assert_line "$output" 'export PATH='"$root/tools"':$PATH'
   assert_line "$output" "export GIT_CONFIG_GLOBAL=$root/gitconfig"
   assert_line "$output" "git lfs install --skip-repo"
+  assert_line "$output" 'git config --global user.name "Declaw Multilib Builder"'
+  assert_line "$output" 'git config --global user.email "declaw-builder@localhost"'
+  assert_line "$output" 'git config --global trailer.changeid.key "Change-Id"'
   assert_line "$output" \
     "repo init -u https://github.com/LineageOS/android.git -b lineage-23.2 --depth=1 --no-clone-bundle --git-lfs"
   assert_line "$output" "export AB_OTA_UPDATER=false"
@@ -666,6 +674,71 @@ test_build() {
     fail "builder dry run emitted a forbidden target, accelerator, or translation layer"
   fi
   [[ ! -s $log ]] || fail "builder dry run invoked a network/source command"
+
+  tools=$(bash -c 'source "$1"; required_tools' \
+    build-tools-test "$ROOT/avd/build-lineage-multilib.sh")
+  for tool in ccache lz4 lzop protoc meson glslangValidator schedtool mksquashfs; do
+    assert_line "$tools" "$tool"
+  done
+  output=$(bash -c 'source "$1"; printf "%s" "$QEMU_IMG_PATH"' \
+    build-tools-test "$ROOT/avd/build-lineage-multilib.sh")
+  [[ $output == /usr/bin/qemu-img ]] || \
+    fail "builder did not require the UTM makefile's exact /usr/bin/qemu-img"
+  modules=$(bash -c 'source "$1"; required_python_modules' \
+    build-tools-test "$ROOT/avd/build-lineage-multilib.sh")
+  assert_line "$modules" yaml
+  assert_line "$modules" google.protobuf
+  assert_line "$modules" mako
+
+  preflight_bin="$tmp/preflight-bin"
+  mkdir -p "$preflight_bin"
+  make_build_fakes "$preflight_bin"
+  cat >"$preflight_bin/python3" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$preflight_bin/python3"
+  : >"$log"
+  set +e
+  output=$(PATH="$preflight_bin:/usr/bin:/bin" FAKE_BUILD_NETWORK_LOG="$log" \
+    BUILD_TEST_MODE=1 BUILD_TEST_REQUIRED_TOOLS='missing-tool-one missing-tool-two' \
+    BUILD_TEST_QEMU_IMG_PATH="$tmp/missing-qemu-img" \
+    BUILD_TEST_IMAGEMAGICK_TOOLS='missing-magick missing-convert' \
+    BUILD_TEST_DISK_GIB=999 BUILD_TEST_RAM_GIB=999 BUILD_PREFLIGHT_ONLY=1 \
+    BUILD_ROOT="$root" "$ROOT/avd/build-lineage-multilib.sh" 2>&1)
+  status=$?
+  set -e
+  [[ $status -eq 2 ]] || fail "aggregated dependency preflight returned $status, expected 2"
+  assert_line "$output" "[build] ERROR: missing required host tool: missing-tool-one"
+  assert_line "$output" "[build] ERROR: missing required host tool: missing-tool-two"
+  assert_line "$output" \
+    "[build] ERROR: missing required executable: $tmp/missing-qemu-img"
+  assert_line "$output" \
+    "[build] ERROR: missing ImageMagick command (need magick or convert)"
+  assert_line "$output" "[build] ERROR: missing required Python module: yaml"
+  assert_line "$output" "[build] ERROR: missing required Python module: google.protobuf"
+  assert_line "$output" "[build] ERROR: missing required Python module: mako"
+  [[ ! -s $log ]] || fail "dependency preflight reached git/curl/repo"
+
+  git_home="$tmp/git-home"
+  git_root="$tmp/git build root"
+  gitconfig="$git_root/gitconfig"
+  mkdir -p "$git_home"
+  printf '[user]\n\tname = Pentester\n' >"$git_home/.gitconfig"
+  home_hash=$(sha256sum "$git_home/.gitconfig" | awk '{ print $1 }')
+  HOME="$git_home" BUILD_ROOT="$git_root" bash -c \
+    'source "$1"; mkdir -p "$BUILD_ROOT"; configure_git_identity' \
+    build-git-test "$ROOT/avd/build-lineage-multilib.sh"
+  [[ $(sha256sum "$git_home/.gitconfig" | awk '{ print $1 }') == "$home_hash" ]] || \
+    fail "builder mutated the operator's normal ~/.gitconfig"
+  [[ ! -e $git_home/.config/git/config ]] || \
+    fail "builder created the operator's XDG git config"
+  [[ $(git config --file "$gitconfig" --get user.name) == 'Declaw Multilib Builder' ]] || \
+    fail "isolated builder gitconfig omitted user.name"
+  [[ $(git config --file "$gitconfig" --get user.email) == 'declaw-builder@localhost' ]] || \
+    fail "isolated builder gitconfig omitted user.email"
+  [[ $(git config --file "$gitconfig" --get trailer.changeid.key) == Change-Id ]] || \
+    fail "isolated builder gitconfig omitted the Change-Id trailer key"
 
   product="$tmp/product/out/target/product/virtio_arm64"
   utm_dir="$product/VirtualMachine/UTM"
@@ -721,10 +794,94 @@ test_build() {
     build-artifact-test "$ROOT/avd/build-lineage-multilib.sh" "$product")
   [[ $output == "$valid_ota" ]] || fail "OTA discovery did not return the sole exact artifact"
 
+  cleanup_product="$tmp/cleanup/out/target/product/virtio_arm64"
+  cleanup_utm="$cleanup_product/VirtualMachine/UTM"
+  mkdir -p "$cleanup_utm"
+  : >"$cleanup_product/lineage_virtio_arm64-ota.zip"
+  : >"$cleanup_product/lineage_other-product-ota.zip"
+  : >"$cleanup_product/UTM-VM-root-virtio_arm64.zip"
+  : >"$cleanup_utm/UTM-VM-old-virtio_arm64.zip"
+  : >"$cleanup_utm/UTM-VM-newer-virtio_arm64.zip"
+  : >"$cleanup_utm/UTM-VM-old-virtio_arm64only.zip"
+  : >"$cleanup_utm/operator-notes.zip"
+  bash -c 'source "$1"; clean_target_artifacts "$2"' \
+    build-clean-test "$ROOT/avd/build-lineage-multilib.sh" "$cleanup_product"
+  [[ ! -e $cleanup_product/lineage_virtio_arm64-ota.zip ]] || \
+    fail "target cleanup left the exact stale OTA"
+  [[ ! -e $cleanup_utm/UTM-VM-old-virtio_arm64.zip && \
+     ! -e $cleanup_utm/UTM-VM-newer-virtio_arm64.zip ]] || \
+    fail "target cleanup left exact stale UTM artifacts"
+  for preserved in \
+    "$cleanup_product/lineage_other-product-ota.zip" \
+    "$cleanup_product/UTM-VM-root-virtio_arm64.zip" \
+    "$cleanup_utm/UTM-VM-old-virtio_arm64only.zip" \
+    "$cleanup_utm/operator-notes.zip"; do
+    [[ -e $preserved ]] || fail "target cleanup removed unrelated file: $preserved"
+  done
+  unsafe_product="$tmp/cleanup/out/target/product/not-the-current-target"
+  mkdir -p "$unsafe_product"
+  : >"$unsafe_product/lineage_virtio_arm64-ota.zip"
+  assert_status 2 bash -c 'source "$1"; clean_target_artifacts "$2"' \
+    build-clean-test "$ROOT/avd/build-lineage-multilib.sh" "$unsafe_product"
+  [[ -e $unsafe_product/lineage_virtio_arm64-ota.zip ]] || \
+    fail "target cleanup removed a file outside the current product directory"
+
+  source_dir="$tmp/build-target/source"
+  tools_dir="$tmp/build-target/pinned-tools"
+  host_bin="$tmp/build-target/host-bin"
+  build_log="$tmp/build-target.log"
+  mkdir -p "$source_dir/build" "$tools_dir" "$host_bin"
+  : >"$build_log"
+  cat >"$tools_dir/repo" <<'SH'
+#!/usr/bin/env bash
+printf 'pinned-repo\t%s\n' "$*" >>"$FAKE_BUILD_TARGET_LOG"
+exit 0
+SH
+  cat >"$host_bin/repo" <<'SH'
+#!/usr/bin/env bash
+printf 'HOST-REPO\t%s\n' "$*" >>"$FAKE_BUILD_TARGET_LOG"
+exit 97
+SH
+  chmod +x "$tools_dir/repo" "$host_bin/repo"
+  cat >"$source_dir/build/envsetup.sh" <<'SH'
+breakfast() {
+  printf 'breakfast\t%s\trepo=%s\n' "$*" "$(command -v repo)" >>"$FAKE_BUILD_TARGET_LOG"
+  mkdir -p "$FAKE_BUILD_PRODUCT/VirtualMachine/UTM"
+  : >"$FAKE_BUILD_PRODUCT/lineage_virtio_arm64-ota.zip"
+  : >"$FAKE_BUILD_PRODUCT/VirtualMachine/UTM/UTM-VM-stale-virtio_arm64.zip"
+  : >"$FAKE_BUILD_PRODUCT/VirtualMachine/UTM/UTM-VM-keep-virtio_arm64only.zip"
+  repo from-breakfast
+}
+m() {
+  [[ ! -e $FAKE_BUILD_PRODUCT/lineage_virtio_arm64-ota.zip ]] || return 91
+  [[ ! -e $FAKE_BUILD_PRODUCT/VirtualMachine/UTM/UTM-VM-stale-virtio_arm64.zip ]] || return 92
+  [[ -e $FAKE_BUILD_PRODUCT/VirtualMachine/UTM/UTM-VM-keep-virtio_arm64only.zip ]] || return 93
+  printf 'm\t%s\trepo=%s\n' "$*" "$(command -v repo)" >>"$FAKE_BUILD_TARGET_LOG"
+  repo from-build
+}
+SH
+  PATH="$host_bin:/usr/bin:/bin" BUILD_ROOT="$tmp/build-target" \
+    LINEAGE_SOURCE_DIR="$source_dir" BUILD_TOOLS_DIR="$tools_dir" \
+    FAKE_BUILD_PRODUCT="$source_dir/out/target/product/virtio_arm64" \
+    FAKE_BUILD_TARGET_LOG="$build_log" bash -c \
+    'source "$1"; build_target' build-target-test \
+    "$ROOT/avd/build-lineage-multilib.sh"
+  grep -Fq -- $'breakfast\tvirtio_arm64 user\trepo='"$tools_dir/repo" "$build_log" || \
+    fail "breakfast did not resolve repo from the pinned tools directory"
+  grep -Fq -- $'m\tvm-utm-zip otapackage\trepo='"$tools_dir/repo" "$build_log" || \
+    fail "build did not resolve repo from the pinned tools directory"
+  assert_line "$(grep '^pinned-repo' "$build_log")" $'pinned-repo\tfrom-breakfast'
+  assert_line "$(grep '^pinned-repo' "$build_log")" $'pinned-repo\tfrom-build'
+  if grep -Fq HOST-REPO "$build_log"; then
+    fail "build/Roomservice invoked a host repo instead of the pinned launcher"
+  fi
+
   : >"$log"
   set +e
   output=$(PATH="$bin:/usr/bin:/bin" FAKE_BUILD_NETWORK_LOG="$log" \
     BUILD_TEST_MODE=1 BUILD_TEST_REQUIRED_TOOLS=missing-lineage-tool \
+    BUILD_TEST_QEMU_IMG_PATH=/usr/bin/true BUILD_TEST_IMAGEMAGICK_TOOLS=true \
+    BUILD_TEST_SKIP_PYTHON_MODULES=1 \
     BUILD_TEST_DISK_GIB=999 BUILD_TEST_RAM_GIB=999 BUILD_PREFLIGHT_ONLY=1 \
     BUILD_ROOT="$root" "$ROOT/avd/build-lineage-multilib.sh" 2>&1)
   status=$?
