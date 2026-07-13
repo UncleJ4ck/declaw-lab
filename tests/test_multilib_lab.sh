@@ -98,6 +98,45 @@ with zipfile.ZipFile(output, "w") as archive:
 PY
 }
 
+make_builder_sidecars() {
+  local archive=$1 mode=${2:-valid} directory metadata sums archive_sha metadata_sha
+  directory=$(dirname "$archive")
+  metadata="$directory/build-metadata.txt"
+  sums="$directory/SHA256SUMS"
+  cat >"$metadata" <<'EOF'
+created_utc=20260713T120000Z
+branch=lineage-23.2
+target=virtio_arm64
+variant=user
+abis=arm64-v8a,armeabi-v7a,armeabi
+zygote=zygote64_32
+EOF
+  case "$mode" in
+    metadata-arm64only)
+      sed -i 's/^target=.*/target=virtio_arm64only/' "$metadata"
+      ;;
+    metadata-wrong-abi)
+      sed -i 's/^abis=.*/abis=arm64-v8a/' "$metadata"
+      ;;
+  esac
+  archive_sha=$(sha256sum "$archive" | awk '{print $1}')
+  metadata_sha=$(sha256sum "$metadata" | awk '{print $1}')
+  printf '%s  %s\n%s  %s\n' \
+    "$archive_sha" "$(basename "$archive")" \
+    "$metadata_sha" build-metadata.txt >"$sums"
+  case "$mode" in
+    wrong-archive-hash)
+      sed -i '1s/^[0-9a-f]*/0000000000000000000000000000000000000000000000000000000000000000/' "$sums"
+      ;;
+    wrong-metadata-hash)
+      sed -i '2s/^[0-9a-f]*/0000000000000000000000000000000000000000000000000000000000000000/' "$sums"
+      ;;
+    duplicate-archive-entry)
+      head -n 1 "$sums" >>"$sums"
+      ;;
+  esac
+}
+
 run_checker_profile() {
   local profile=$1 expected_status=$2 adb_timeout=${3:-1} output status
   set +e
@@ -1008,7 +1047,7 @@ case "${FAKE_QEMU_IMG_MODE:-forbid}" in
     [[ ${1:-} == convert ]] || exit 96
     cp -- "${@: -2:1}" "${@: -1}"
     ;;
-  already-patched|conflicting)
+  pristine|already-patched|conflicting)
     /usr/bin/python3 - "${@: -1}" "$FAKE_QEMU_IMG_MODE" <<'PY'
 import pathlib
 import sys
@@ -1018,7 +1057,9 @@ mode = sys.argv[2]
 image = bytearray(64 * 512)
 partition = 4 * 512
 image[partition:partition + 8] = b"VNDRBOOT"
-if mode == "already-patched":
+if mode == "pristine":
+    cmdline = b"console=ttyAMA0 androidboot.hardware=virt"
+elif mode == "already-patched":
     cmdline = b"console=ttyAMA0 androidboot.debuggable=1 androidboot.selinux=permissive"
 else:
     cmdline = b"console=ttyAMA0 androidboot.debuggable=0 androidboot.selinux=enforcing"
@@ -1063,7 +1104,8 @@ assert_no_staging_dir() {
 test_provision() {
   local tmp home bin log archive before output status target build_root newest old
   local bad wrong malformed missing unsafe duplicate top_payload collision fifo
-  local sentinel boot_home override mode
+  local sentinel boot_home override mode case_dir case_archive
+  local before_metadata before_sums newest_sha metadata_sha sums_sha raw_sha
   tmp=$(mktemp -d)
   home="$tmp/home"
   bin="$tmp/bin"
@@ -1075,7 +1117,10 @@ test_provision() {
   : >"$log"
   make_provision_fakes "$bin"
   make_utm_archive "$archive"
+  make_builder_sidecars "$archive"
   before=$(sha256sum "$archive" | awk '{ print $1 }')
+  before_metadata=$(sha256sum "$(dirname "$archive")/build-metadata.txt" | awk '{ print $1 }')
+  before_sums=$(sha256sum "$(dirname "$archive")/SHA256SUMS" | awk '{ print $1 }')
 
   output=$(HOME="$home" PATH="$bin:/usr/bin:/bin" \
     FAKE_PROVISION_COMMAND_LOG="$log" LINEAGE_MULTILIB_ZIP="$archive" \
@@ -1091,20 +1136,27 @@ test_provision() {
   [[ ! -e $target ]] || fail "provision dry run created its target"
   [[ $(sha256sum "$archive" | awk '{ print $1 }') == "$before" ]] || \
     fail "provisioning modified the explicit source archive"
+  [[ $(sha256sum "$(dirname "$archive")/build-metadata.txt" | awk '{ print $1 }') == "$before_metadata" ]] || \
+    fail "provisioning modified build-metadata.txt"
+  [[ $(sha256sum "$(dirname "$archive")/SHA256SUMS" | awk '{ print $1 }') == "$before_sums" ]] || \
+    fail "provisioning modified SHA256SUMS"
   [[ ! -s $log ]] || fail "provision dry run invoked unzip, qemu, taskset, or network"
 
-  wrong="$tmp/lineage-virtio_arm64.zip"
+  wrong="$tmp/invalid/wrong-name/lineage-virtio_arm64.zip"
+  mkdir -p "$(dirname "$wrong")"
   cp "$archive" "$wrong"
-  bad="$tmp/UTM-VM-lineage-test-virtio_arm64only.zip"
+  bad="$tmp/invalid/arm64only/UTM-VM-lineage-test-virtio_arm64only.zip"
+  mkdir -p "$(dirname "$bad")"
   cp "$archive" "$bad"
-  printf 'not a zip\n' >"$tmp/UTM-VM-malformed-virtio_arm64.zip"
-  malformed="$tmp/UTM-VM-malformed-virtio_arm64.zip"
-  missing="$tmp/UTM-VM-missing-virtio_arm64.zip"
-  unsafe="$tmp/UTM-VM-unsafe-virtio_arm64.zip"
-  duplicate="$tmp/UTM-VM-duplicate-virtio_arm64.zip"
-  top_payload="$tmp/UTM-VM-top-level-virtio_arm64.zip"
-  collision="$tmp/UTM-VM-collision-virtio_arm64.zip"
-  fifo="$tmp/UTM-VM-fifo-virtio_arm64.zip"
+  malformed="$tmp/invalid/malformed/UTM-VM-malformed-virtio_arm64.zip"
+  mkdir -p "$(dirname "$malformed")"
+  printf 'not a zip\n' >"$malformed"
+  missing="$tmp/invalid/missing/UTM-VM-missing-virtio_arm64.zip"
+  unsafe="$tmp/invalid/unsafe/UTM-VM-unsafe-virtio_arm64.zip"
+  duplicate="$tmp/invalid/duplicate/UTM-VM-duplicate-virtio_arm64.zip"
+  top_payload="$tmp/invalid/top-level/UTM-VM-top-level-virtio_arm64.zip"
+  collision="$tmp/invalid/collision/UTM-VM-collision-virtio_arm64.zip"
+  fifo="$tmp/invalid/fifo/UTM-VM-fifo-virtio_arm64.zip"
   make_utm_archive "$missing" missing-layout
   make_utm_archive "$unsafe" unsafe
   make_utm_archive "$duplicate" duplicate-utm
@@ -1113,6 +1165,7 @@ test_provision() {
   make_utm_archive "$fifo" special-fifo
   for archive in "$bad" "$wrong" "$malformed" "$missing" "$unsafe" "$duplicate" \
     "$top_payload" "$collision" "$fifo"; do
+    make_builder_sidecars "$archive"
     : >"$log"
     set +e
     output=$(HOME="$home" PATH="$bin:/usr/bin:/bin" \
@@ -1128,11 +1181,43 @@ test_provision() {
     [[ ! -e $target ]] || fail "invalid archive published a rig"
   done
 
+  for mode in missing-metadata missing-sums wrong-archive-hash \
+    wrong-metadata-hash duplicate-archive-entry metadata-arm64only metadata-wrong-abi \
+    renamed-artifact; do
+    case_dir="$tmp/sidecar-cases/$mode"
+    case_archive="$case_dir/UTM-VM-$mode-virtio_arm64.zip"
+    make_utm_archive "$case_archive"
+    make_builder_sidecars "$case_archive" "$mode"
+    case "$mode" in
+      missing-metadata) rm -f "$case_dir/build-metadata.txt" ;;
+      missing-sums) rm -f "$case_dir/SHA256SUMS" ;;
+      renamed-artifact)
+        mv "$case_archive" "$case_dir/UTM-VM-renamed-virtio_arm64.zip"
+        case_archive="$case_dir/UTM-VM-renamed-virtio_arm64.zip"
+        ;;
+    esac
+    : >"$log"
+    set +e
+    output=$(HOME="$home" PATH="$bin:/usr/bin:/bin" \
+      FAKE_PROVISION_COMMAND_LOG="$log" LINEAGE_MULTILIB_ZIP="$case_archive" \
+      PROVISION_DRY_RUN=1 "$ROOT/avd/provision.sh" 2>&1)
+    status=$?
+    set -e
+    [[ $status -eq 2 ]] || {
+      printf '%s\n' "$output" >&2
+      fail "invalid builder sidecars $mode returned $status, expected 2"
+    }
+    [[ ! -s $log ]] || fail "invalid sidecars invoked external mutation commands"
+    [[ ! -e $target ]] || fail "invalid sidecars published a rig"
+  done
+
   build_root="$tmp/build"
   old="$build_root/dist/20260712-old-virtio_arm64/UTM-VM-old-virtio_arm64.zip"
   newest="$build_root/dist/20260713-new-virtio_arm64/UTM-VM-new-virtio_arm64.zip"
   make_utm_archive "$old"
   make_utm_archive "$newest"
+  make_builder_sidecars "$old"
+  make_builder_sidecars "$newest"
   touch -t 202607121200 "$old"
   touch -t 202607131200 "$newest"
   output=$(HOME="$home" PATH="$bin:/usr/bin:/bin" \
@@ -1190,6 +1275,57 @@ SH
     [[ ! -e $target ]] || fail "$mode vendor_boot source published a rig"
     assert_no_staging_dir "$target"
   done
+
+  newest_sha=$(sha256sum "$newest" | awk '{print $1}')
+  metadata_sha=$(sha256sum "$(dirname "$newest")/build-metadata.txt" | awk '{print $1}')
+  sums_sha=$(sha256sum "$(dirname "$newest")/SHA256SUMS" | awk '{print $1}')
+  : >"$log"
+  output=$(HOME="$home" PATH="$bin:/usr/bin:/bin" \
+    FAKE_QEMU_IMG_MODE=pristine FAKE_PROVISION_COMMAND_LOG="$log" \
+    LINEAGE_MULTILIB_ZIP="$newest" "$ROOT/avd/provision.sh")
+  assert_line "$output" "[provision] PASS: published complete multilib rig at $target"
+  [[ -f $target/vda.raw ]] || fail "successful provisioning omitted vda.raw"
+  python3 - "$target/vda.raw" <<'PY'
+import pathlib
+import sys
+
+image = pathlib.Path(sys.argv[1]).read_bytes()
+partition = 4 * 512
+assert image[partition:partition + 8] == b"VNDRBOOT"
+cmdline = image[partition + 28:partition + 28 + 2048].split(b"\0", 1)[0].decode().split()
+assert cmdline.count("androidboot.debuggable=1") == 1, cmdline
+assert cmdline.count("androidboot.selinux=permissive") == 1, cmdline
+assert image.count(b"ro.debuggable=0") == 0
+assert image.count(b"ro.adb.secure=1") == 0
+assert image.count(b"ro.debuggable=1") == 1
+assert image.count(b"ro.adb.secure=0") == 1
+PY
+  [[ $(<"$target/LineageOS_on_arm64.utm/config.plist") == plist ]] || \
+    fail "published rig omitted the UTM config"
+  [[ $(<"$target/LineageOS_on_arm64.utm/Data/efi_vars.fd") == efi-vars ]] || \
+    fail "published rig omitted the UTM EFI vars"
+  [[ $(<"$target/LineageOS_on_arm64.utm/Data/vdb.qcow2") == fake-data-qcow2 ]] || \
+    fail "published rig omitted the UTM data disk"
+  assert_line "$(<"$target/artifact.sha256")" "$newest_sha  $(basename "$newest")"
+  raw_sha=$(sha256sum "$target/vda.raw" | awk '{print $1}')
+  grep -Fqx -- "source_sha256=$newest_sha" "$target/provenance.txt" || \
+    fail "provenance omitted the verified source hash"
+  grep -Fqx -- "vda_raw_sha256=$raw_sha" "$target/provenance.txt" || \
+    fail "provenance omitted the published raw hash"
+  [[ $(sha256sum "$target/build-metadata.txt" | awk '{print $1}') == "$metadata_sha" ]] || \
+    fail "published builder metadata differs from the verified sidecar"
+  [[ $(sha256sum "$target/SHA256SUMS" | awk '{print $1}') == "$sums_sha" ]] || \
+    fail "published checksum manifest differs from the verified sidecar"
+  [[ ! -e $target/.input && ! -e $target/$(basename "$newest") ]] || \
+    fail "published rig retained its large staged input copy"
+  [[ $(sha256sum "$newest" | awk '{print $1}') == "$newest_sha" ]] || \
+    fail "successful provisioning changed its source ZIP"
+  [[ $(sha256sum "$(dirname "$newest")/build-metadata.txt" | awk '{print $1}') == "$metadata_sha" ]] || \
+    fail "successful provisioning changed source metadata"
+  [[ $(sha256sum "$(dirname "$newest")/SHA256SUMS" | awk '{print $1}') == "$sums_sha" ]] || \
+    fail "successful provisioning changed source checksums"
+  assert_no_staging_dir "$target"
+  rm -rf "$target"
 
   # Let extraction and conversion succeed, then fail the first partition probe.
   # The published target must still be absent and staging must be cleaned.

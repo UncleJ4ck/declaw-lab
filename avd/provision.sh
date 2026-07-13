@@ -104,6 +104,86 @@ for expected in required:
 PY
 }
 
+validate_builder_output() {
+  local archive=$1 metadata=$2 checksums=$3
+  python3 - "$archive" "$metadata" "$checksums" <<'PY'
+import hashlib
+import pathlib
+import re
+import sys
+
+archive = pathlib.Path(sys.argv[1])
+metadata = pathlib.Path(sys.argv[2])
+checksums = pathlib.Path(sys.argv[3])
+
+def reject(message):
+    print(f"[provision] ERROR: {message}", file=sys.stderr)
+    raise SystemExit(2)
+
+def sha256(path):
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as stream:
+            for block in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(block)
+    except OSError as exc:
+        reject(f"cannot read builder output {path}: {exc}")
+    return digest.hexdigest()
+
+try:
+    metadata_text = metadata.read_text(encoding="utf-8")
+except (OSError, UnicodeError) as exc:
+    reject(f"cannot read build metadata {metadata}: {exc}")
+if "arm64only" in metadata_text:
+    reject("build metadata identifies a forbidden arm64only product")
+
+values = {}
+for line in metadata_text.splitlines():
+    if not line or "=" not in line:
+        continue
+    key, value = line.split("=", 1)
+    values.setdefault(key, []).append(value)
+required = {
+    "branch": "lineage-23.2",
+    "target": "virtio_arm64",
+    "variant": "user",
+    "abis": "arm64-v8a,armeabi-v7a,armeabi",
+    "zygote": "zygote64_32",
+}
+for key, expected in required.items():
+    actual = values.get(key, [])
+    if actual != [expected]:
+        reject(
+            f"build metadata contract mismatch for {key}: "
+            f"expected {expected!r}, found {actual!r}"
+        )
+
+try:
+    checksum_lines = checksums.read_text(encoding="utf-8").splitlines()
+except (OSError, UnicodeError) as exc:
+    reject(f"cannot read SHA256SUMS {checksums}: {exc}")
+entries = {}
+for number, line in enumerate(checksum_lines, 1):
+    match = re.fullmatch(r"([0-9A-Fa-f]{64}) [ *](.+)", line)
+    if not match:
+        reject(f"malformed SHA256SUMS line {number}")
+    digest, name = match.groups()
+    entries.setdefault(name, []).append(digest.lower())
+
+expected_hashes = {
+    archive.name: sha256(archive),
+    "build-metadata.txt": sha256(metadata),
+}
+for name, expected in expected_hashes.items():
+    actual = entries.get(name, [])
+    if actual != [expected]:
+        reject(
+            f"SHA256SUMS must contain exactly one correct hash for {name}: "
+            f"expected {expected}, found {actual!r}"
+        )
+PY
+}
+
 patch_vendor_boot() {
   local raw=$1 work=$2 vb_start vb_size vb_image verify_image
   vb_start=$(parted -sm "$raw" unit s print 2>/dev/null | \
@@ -226,23 +306,33 @@ cleanup() {
   fi
 }
 
-ARCHIVE="${LINEAGE_MULTILIB_ZIP:-}"
-[[ -n $ARCHIVE ]] || ARCHIVE=$(discover_archive)
-[[ -f $ARCHIVE ]] || error "artifact not found: $ARCHIVE"
-ARCHIVE=$(cd "$(dirname "$ARCHIVE")" && pwd -P)/$(basename "$ARCHIVE")
-validate_archive_name "$ARCHIVE"
+SOURCE_ARCHIVE="${LINEAGE_MULTILIB_ZIP:-}"
+[[ -n $SOURCE_ARCHIVE ]] || SOURCE_ARCHIVE=$(discover_archive)
+[[ -f $SOURCE_ARCHIVE ]] || error "artifact not found: $SOURCE_ARCHIVE"
+SOURCE_ARCHIVE=$(cd "$(dirname "$SOURCE_ARCHIVE")" && pwd -P)/$(basename "$SOURCE_ARCHIVE")
+SOURCE_DIR=$(dirname "$SOURCE_ARCHIVE")
+SOURCE_METADATA="${LINEAGE_BUILD_METADATA:-$SOURCE_DIR/build-metadata.txt}"
+SOURCE_CHECKSUMS="${LINEAGE_SHA256SUMS:-$SOURCE_DIR/SHA256SUMS}"
+[[ -f $SOURCE_METADATA ]] || error "builder metadata not found: $SOURCE_METADATA"
+[[ -f $SOURCE_CHECKSUMS ]] || error "builder checksums not found: $SOURCE_CHECKSUMS"
+SOURCE_METADATA=$(cd "$(dirname "$SOURCE_METADATA")" && pwd -P)/$(basename "$SOURCE_METADATA")
+SOURCE_CHECKSUMS=$(cd "$(dirname "$SOURCE_CHECKSUMS")" && pwd -P)/$(basename "$SOURCE_CHECKSUMS")
+ARCHIVE_NAME=$(basename "$SOURCE_ARCHIVE")
+
 need python3
 need sha256sum
-validate_archive_layout "$ARCHIVE"
-SOURCE_SHA=$(sha256sum "$ARCHIVE" | awk '{print $1}')
-
-echo "[provision] source=$ARCHIVE"
-echo "[provision] sha256=$SOURCE_SHA"
-echo "[provision] contract=$CONTRACT"
-echo "[provision] target=$DIR"
 
 if [[ $DRY_RUN == 1 ]]; then
+  validate_archive_name "$SOURCE_ARCHIVE"
+  validate_builder_output "$SOURCE_ARCHIVE" "$SOURCE_METADATA" "$SOURCE_CHECKSUMS"
+  validate_archive_layout "$SOURCE_ARCHIVE"
+  SOURCE_SHA=$(sha256sum "$SOURCE_ARCHIVE" | awk '{print $1}')
+  echo "[provision] source=$SOURCE_ARCHIVE"
+  echo "[provision] sha256=$SOURCE_SHA"
+  echo "[provision] contract=$CONTRACT"
+  echo "[provision] target=$DIR"
   echo "[provision] dry-run: stage ${DIR}.staging.XXXXXX"
+  echo "[provision] dry-run: copy ZIP + build-metadata.txt + SHA256SUMS once into protected staging"
   echo "[provision] dry-run: extract $UTM_ROOT with validated safe paths"
   echo "[provision] dry-run: convert $UTM_ROOT/Data/vda.qcow2 -> vda.raw"
   echo "[provision] dry-run: patch staging vendor_boot and Android properties"
@@ -252,16 +342,36 @@ if [[ $DRY_RUN == 1 ]]; then
 fi
 
 [[ ! -e $DIR && ! -L $DIR ]] || error "target already exists; refusing to overwrite: $DIR"
-for tool in unzip qemu-img parted dd python3 sha256sum awk mktemp; do
+for tool in unzip qemu-img parted dd python3 sha256sum awk mktemp cp chmod mv rm rmdir mkdir; do
   need "$tool"
 done
 
 mkdir -p -- "$(dirname "$DIR")"
+umask 077
 STAGE=$(mktemp -d "${DIR}.staging.XXXXXX")
 trap cleanup EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
+
+INPUT="$STAGE/.input"
+mkdir "$INPUT"
+cp -- "$SOURCE_ARCHIVE" "$INPUT/$ARCHIVE_NAME"
+cp -- "$SOURCE_METADATA" "$INPUT/build-metadata.txt"
+cp -- "$SOURCE_CHECKSUMS" "$INPUT/SHA256SUMS"
+chmod a-w "$INPUT/$ARCHIVE_NAME" "$INPUT/build-metadata.txt" "$INPUT/SHA256SUMS"
+ARCHIVE="$INPUT/$ARCHIVE_NAME"
+METADATA="$INPUT/build-metadata.txt"
+CHECKSUMS="$INPUT/SHA256SUMS"
+
+validate_archive_name "$ARCHIVE"
+validate_builder_output "$ARCHIVE" "$METADATA" "$CHECKSUMS"
+validate_archive_layout "$ARCHIVE"
+SOURCE_SHA=$(sha256sum "$ARCHIVE" | awk '{print $1}')
+echo "[provision] source=$SOURCE_ARCHIVE"
+echo "[provision] sha256=$SOURCE_SHA"
+echo "[provision] contract=$CONTRACT"
+echo "[provision] target=$DIR"
 
 echo "[provision] extracting validated UTM artifact into staging"
 unzip -q "$ARCHIVE" -d "$STAGE"
@@ -270,6 +380,11 @@ for path in "$STAGE/$UTM_ROOT/config.plist" "$DATA/efi_vars.fd" \
   "$DATA/vda.qcow2" "$DATA/vdb.qcow2"; do
   [[ -f $path ]] || error "extracted layout lost required file: $path"
 done
+
+mv -- "$METADATA" "$STAGE/build-metadata.txt"
+mv -- "$CHECKSUMS" "$STAGE/SHA256SUMS"
+rm -f -- "$ARCHIVE"
+rmdir "$INPUT"
 
 echo "[provision] converting vda.qcow2 -> vda.raw"
 qemu-img convert -O raw "$DATA/vda.qcow2" "$STAGE/vda.raw"
@@ -281,9 +396,9 @@ echo "[provision] patching staged ro.debuggable and ro.adb.secure properties"
 patch_system_properties "$STAGE/vda.raw"
 
 RAW_SHA=$(sha256sum "$STAGE/vda.raw" | awk '{print $1}')
-printf '%s  %s\n' "$SOURCE_SHA" "$(basename "$ARCHIVE")" >"$STAGE/artifact.sha256"
+printf '%s  %s\n' "$SOURCE_SHA" "$ARCHIVE_NAME" >"$STAGE/artifact.sha256"
 cat >"$STAGE/provenance.txt" <<EOF
-source=$ARCHIVE
+source=$SOURCE_ARCHIVE
 source_sha256=$SOURCE_SHA
 vda_raw_sha256=$RAW_SHA
 contract=$CONTRACT
