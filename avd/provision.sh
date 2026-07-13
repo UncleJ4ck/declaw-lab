@@ -71,9 +71,7 @@ try:
 except (OSError, zipfile.BadZipFile) as exc:
     reject(f"malformed UTM ZIP: {archive}: {exc}")
 
-if len(names) != len(set(names)):
-    reject("archive contains duplicate entries")
-
+normalized_names = {}
 for info in infos:
     name = info.filename
     if "\\" in name or "\x00" in name:
@@ -81,18 +79,19 @@ for info in infos:
     path = pathlib.PurePosixPath(name)
     if path.is_absolute() or ".." in path.parts or not path.parts:
         reject(f"unsafe archive path: {name!r}")
+    if path.parts[0] != root:
+        reject(f"archive entry is outside {root}: {name}")
+    normalized = str(path)
+    if normalized in normalized_names:
+        reject(
+            "archive paths collide after normalization: "
+            f"{normalized_names[normalized]!r} and {name!r}"
+        )
+    normalized_names[normalized] = name
     mode = info.external_attr >> 16
-    if mode and stat.S_ISLNK(mode):
-        reject(f"archive symlink is not allowed: {name}")
-
-utm_roots = {
-    pathlib.PurePosixPath(name).parts[0]
-    for name in names
-    if pathlib.PurePosixPath(name).parts
-    and pathlib.PurePosixPath(name).parts[0].endswith(".utm")
-}
-if utm_roots != {root}:
-    reject(f"archive must contain exactly one {root} layout")
+    file_type = stat.S_IFMT(mode)
+    if file_type not in (0, stat.S_IFREG, stat.S_IFDIR):
+        reject(f"archive special file is not allowed: {name}")
 
 missing = sorted(required.difference(names))
 if missing:
@@ -121,26 +120,32 @@ patch_vendor_boot() {
 import pathlib
 import sys
 
+def reject(message):
+    print(f"[provision] ERROR: {message}", file=sys.stderr)
+    raise SystemExit(2)
+
 path = pathlib.Path(sys.argv[1])
 data = bytearray(path.read_bytes())
 if data[:8] != b"VNDRBOOT":
-    raise SystemExit("[provision] ERROR: vendor_boot header is not VNDRBOOT")
+    reject("vendor_boot header is not VNDRBOOT")
 offset, size = 28, 2048
 raw = bytes(data[offset:offset + size]).split(b"\0", 1)[0]
 try:
     current = raw.decode("ascii")
 except UnicodeDecodeError as exc:
-    raise SystemExit(f"[provision] ERROR: vendor_boot cmdline is not ASCII: {exc}")
+    reject(f"vendor_boot cmdline is not ASCII: {exc}")
 
 required = ("androidboot.debuggable=1", "androidboot.selinux=permissive")
-for token in required:
-    count = current.split().count(token)
-    if count > 1:
-        raise SystemExit(f"[provision] ERROR: vendor_boot cmdline repeats {token}")
-missing = [token for token in required if token not in current.split()]
-updated = (current + (" " if current and missing else "") + " ".join(missing)).encode("ascii")
+tokens = current.split()
+for key in ("androidboot.debuggable=", "androidboot.selinux="):
+    conflicts = [token for token in tokens if token.startswith(key)]
+    if conflicts:
+        reject(
+            f"vendor_boot cmdline is not pristine; found {', '.join(conflicts)}"
+        )
+updated = (current + (" " if current else "") + " ".join(required)).encode("ascii")
 if len(updated) >= size:
-    raise SystemExit("[provision] ERROR: patched vendor_boot cmdline does not fit")
+    reject("patched vendor_boot cmdline does not fit")
 data[offset:offset + size] = updated + b"\0" * (size - len(updated))
 path.write_bytes(data)
 PY
@@ -152,13 +157,17 @@ PY
 import pathlib
 import sys
 
+def reject(message):
+    print(f"[provision] ERROR: {message}", file=sys.stderr)
+    raise SystemExit(2)
+
 data = pathlib.Path(sys.argv[1]).read_bytes()
 if data[:8] != b"VNDRBOOT":
-    raise SystemExit("[provision] ERROR: patched vendor_boot header changed")
+    reject("patched vendor_boot header changed")
 cmdline = data[28:28 + 2048].split(b"\0", 1)[0].decode("ascii").split()
 for token in ("androidboot.debuggable=1", "androidboot.selinux=permissive"):
     if cmdline.count(token) != 1:
-        raise SystemExit(f"[provision] ERROR: vendor_boot postcondition failed for {token}")
+        reject(f"vendor_boot postcondition failed for {token}")
 PY
   rm -f -- "$vb_image" "$verify_image"
 }

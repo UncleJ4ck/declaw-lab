@@ -62,6 +62,7 @@ make_utm_archive() {
   local output=$1 mode=${2:-valid}
   python3 - "$output" "$mode" <<'PY'
 import pathlib
+import stat
 import sys
 import zipfile
 
@@ -80,11 +81,20 @@ elif mode == "unsafe":
     entries["../escaped-from-archive"] = b"unsafe"
 elif mode == "duplicate-utm":
     entries["Unexpected.utm/config.plist"] = b"unexpected"
+elif mode == "top-level-payload":
+    entries["operator-payload.txt"] = b"outside the UTM root"
+elif mode == "normalized-collision":
+    entries[f"{root}/./config.plist"] = b"collides after normalization"
 
 output.parent.mkdir(parents=True, exist_ok=True)
 with zipfile.ZipFile(output, "w") as archive:
     for name, data in entries.items():
         archive.writestr(name, data)
+    if mode == "special-fifo":
+        fifo = zipfile.ZipInfo(f"{root}/Data/untrusted-fifo")
+        fifo.create_system = 3
+        fifo.external_attr = (stat.S_IFIFO | 0o644) << 16
+        archive.writestr(fifo, b"")
 PY
 }
 
@@ -998,6 +1008,26 @@ case "${FAKE_QEMU_IMG_MODE:-forbid}" in
     [[ ${1:-} == convert ]] || exit 96
     cp -- "${@: -2:1}" "${@: -1}"
     ;;
+  already-patched|conflicting)
+    /usr/bin/python3 - "${@: -1}" "$FAKE_QEMU_IMG_MODE" <<'PY'
+import pathlib
+import sys
+
+output = pathlib.Path(sys.argv[1])
+mode = sys.argv[2]
+image = bytearray(64 * 512)
+partition = 4 * 512
+image[partition:partition + 8] = b"VNDRBOOT"
+if mode == "already-patched":
+    cmdline = b"console=ttyAMA0 androidboot.debuggable=1 androidboot.selinux=permissive"
+else:
+    cmdline = b"console=ttyAMA0 androidboot.debuggable=0 androidboot.selinux=enforcing"
+image[partition + 28:partition + 28 + len(cmdline)] = cmdline
+properties = b"ro.debuggable=0\x00ro.adb.secure=1\x00"
+image[20 * 512:20 * 512 + len(properties)] = properties
+output.write_bytes(image)
+PY
+    ;;
   *) exit 95 ;;
 esac
 SH
@@ -1032,7 +1062,8 @@ assert_no_staging_dir() {
 
 test_provision() {
   local tmp home bin log archive before output status target build_root newest old
-  local bad wrong malformed missing unsafe duplicate sentinel boot_home override
+  local bad wrong malformed missing unsafe duplicate top_payload collision fifo
+  local sentinel boot_home override mode
   tmp=$(mktemp -d)
   home="$tmp/home"
   bin="$tmp/bin"
@@ -1071,10 +1102,17 @@ test_provision() {
   missing="$tmp/UTM-VM-missing-virtio_arm64.zip"
   unsafe="$tmp/UTM-VM-unsafe-virtio_arm64.zip"
   duplicate="$tmp/UTM-VM-duplicate-virtio_arm64.zip"
+  top_payload="$tmp/UTM-VM-top-level-virtio_arm64.zip"
+  collision="$tmp/UTM-VM-collision-virtio_arm64.zip"
+  fifo="$tmp/UTM-VM-fifo-virtio_arm64.zip"
   make_utm_archive "$missing" missing-layout
   make_utm_archive "$unsafe" unsafe
   make_utm_archive "$duplicate" duplicate-utm
-  for archive in "$bad" "$wrong" "$malformed" "$missing" "$unsafe" "$duplicate"; do
+  make_utm_archive "$top_payload" top-level-payload
+  make_utm_archive "$collision" normalized-collision
+  make_utm_archive "$fifo" special-fifo
+  for archive in "$bad" "$wrong" "$malformed" "$missing" "$unsafe" "$duplicate" \
+    "$top_payload" "$collision" "$fifo"; do
     : >"$log"
     set +e
     output=$(HOME="$home" PATH="$bin:/usr/bin:/bin" \
@@ -1126,6 +1164,32 @@ test_provision() {
   [[ $status -eq 42 ]] || fail "injected conversion failure returned $status, expected 42"
   [[ ! -e $target ]] || fail "conversion failure published a partial rig"
   assert_no_staging_dir "$target"
+
+  cat >"$bin/parted" <<'SH'
+#!/usr/bin/env bash
+printf 'parted\t%s\n' "$*" >>"$FAKE_PROVISION_COMMAND_LOG"
+cat <<'EOF'
+BYT;
+fixture.raw:64s:file:512:512:gpt:fixture:;
+1:4s:19s:16s::vendor_boot:;
+EOF
+SH
+  chmod +x "$bin/parted"
+  for mode in already-patched conflicting; do
+    : >"$log"
+    set +e
+    output=$(HOME="$home" PATH="$bin:/usr/bin:/bin" \
+      FAKE_QEMU_IMG_MODE="$mode" FAKE_PROVISION_COMMAND_LOG="$log" \
+      LINEAGE_MULTILIB_ZIP="$newest" "$ROOT/avd/provision.sh" 2>&1)
+    status=$?
+    set -e
+    [[ $status -eq 2 ]] || {
+      printf '%s\n' "$output" >&2
+      fail "$mode vendor_boot source returned $status, expected 2"
+    }
+    [[ ! -e $target ]] || fail "$mode vendor_boot source published a rig"
+    assert_no_staging_dir "$target"
+  done
 
   # Let extraction and conversion succeed, then fail the first partition probe.
   # The published target must still be absent and staging must be cleaned.
