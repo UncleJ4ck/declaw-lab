@@ -61,16 +61,26 @@ qemu_down() {
   sleep 2; pgrep -f 'qemu-system-aarch64.*declaw-lineage' >/dev/null && echo "[qemu] still up" || echo "[qemu] down (MITM stopped, guest redirect gone with the VM)"
 }
 qemu_status() {
-  pgrep -f 'qemu-system-aarch64.*declaw-lineage' >/dev/null && echo "[qemu] running" || { echo "[qemu] stopped"; return; }
-  adb connect "$QDEV" >/dev/null 2>&1 || true
+  local host_process=not-found adb_timeout="${LAB_ADB_TIMEOUT:-5}" state
   local uid release kernel selinux zygote abilist64 abilist32
-  uid="$(adb -s "$QDEV" shell id -u 2>/dev/null | tr -d '\r' || true)"
-  release="$(adb -s "$QDEV" shell getprop ro.build.version.release 2>/dev/null | tr -d '\r' || true)"
-  kernel="$(adb -s "$QDEV" shell uname -m 2>/dev/null | tr -d '\r' || true)"
-  selinux="$(adb -s "$QDEV" shell getenforce 2>/dev/null | tr -d '\r' || true)"
-  zygote="$(adb -s "$QDEV" shell getprop ro.zygote 2>/dev/null | tr -d '\r' || true)"
-  abilist64="$(adb -s "$QDEV" shell getprop ro.product.cpu.abilist64 2>/dev/null | tr -d '\r' || true)"
-  abilist32="$(adb -s "$QDEV" shell getprop ro.product.cpu.abilist32 2>/dev/null | tr -d '\r' || true)"
+  pgrep -f '[q]emu-system-aarch64.*declaw-lineage' >/dev/null && host_process=running || true
+  echo "[qemu] host-process=$host_process"
+
+  timeout "$adb_timeout" adb connect "$QDEV" >/dev/null 2>&1 || true
+  state="$(timeout "$adb_timeout" adb -s "$QDEV" get-state 2>/dev/null | tr -d '\r' || true)"
+  if [ "$state" != device ]; then
+    echo "[qemu] guest=unreachable serial=$QDEV"
+    return 1
+  fi
+  echo "[qemu] guest=reachable serial=$QDEV"
+
+  uid="$(timeout "$adb_timeout" adb -s "$QDEV" shell id -u 2>/dev/null | tr -d '\r' || true)"
+  release="$(timeout "$adb_timeout" adb -s "$QDEV" shell getprop ro.build.version.release 2>/dev/null | tr -d '\r' || true)"
+  kernel="$(timeout "$adb_timeout" adb -s "$QDEV" shell uname -m 2>/dev/null | tr -d '\r' || true)"
+  selinux="$(timeout "$adb_timeout" adb -s "$QDEV" shell getenforce 2>/dev/null | tr -d '\r' || true)"
+  zygote="$(timeout "$adb_timeout" adb -s "$QDEV" shell getprop ro.zygote 2>/dev/null | tr -d '\r' || true)"
+  abilist64="$(timeout "$adb_timeout" adb -s "$QDEV" shell getprop ro.product.cpu.abilist64 2>/dev/null | tr -d '\r' || true)"
+  abilist32="$(timeout "$adb_timeout" adb -s "$QDEV" shell getprop ro.product.cpu.abilist32 2>/dev/null | tr -d '\r' || true)"
   echo "[qemu] up: uid=${uid:-?} release=${release:-?} kernel=${kernel:-?} selinux=${selinux:-?}"
   echo "[qemu] zygote=${zygote:-<unreachable>}"
   echo "[qemu] abilist64=${abilist64:-<empty>}"
@@ -101,7 +111,56 @@ qemu_check() {
   adb connect "$QDEV" >/dev/null 2>&1 || true
   "$HERE/check-multilib.sh" "$QDEV"
 }
+qemu_install_usage() {
+  echo "usage: lab qemu install [--abi arm64-v8a|armeabi-v7a] APP" >&2
+}
+qemu_install_validate() {
+  local app=""
+  case $# in
+    0)
+      qemu_install_usage
+      return 2
+      ;;
+    1)
+      if [ "$1" = --abi ]; then
+        echo "[install] ERROR: --abi requires a value and APP path" >&2
+        qemu_install_usage
+        return 2
+      fi
+      app="$1"
+      ;;
+    3)
+      if [ "$1" != --abi ]; then
+        echo "[install] ERROR: expected exactly one APP path" >&2
+        qemu_install_usage
+        return 2
+      fi
+      case "$2" in
+        arm64-v8a|armeabi-v7a) ;;
+        *)
+          echo "[install] ERROR: unsupported qemu ABI $2 (expected arm64-v8a or armeabi-v7a)" >&2
+          return 2
+          ;;
+      esac
+      app="$3"
+      ;;
+    *)
+      if [ "${1:-}" = --abi ] && [ $# -lt 3 ]; then
+        echo "[install] ERROR: --abi requires a value and APP path" >&2
+      else
+        echo "[install] ERROR: expected exactly one APP path" >&2
+      fi
+      qemu_install_usage
+      return 2
+      ;;
+  esac
+  if [ ! -e "$app" ]; then
+    echo "[install] ERROR: app path not found: $app" >&2
+    return 2
+  fi
+}
 qemu_install() {
+  qemu_install_validate "$@" || return
   qemu_ensure
   "$HERE/check-multilib.sh" "$QDEV"
   "$HERE/install-app.sh" "$QDEV" "$@"
@@ -242,7 +301,14 @@ do_capture() {
   local arg="${2:-}" own="" who="all apps" vpkg=""
   if [ -n "$arg" ] && [ -e "$arg" ]; then
     echo "[capture] installing $arg"
-    "$HERE/install-app.sh" "$1" "$arg"
+    local -a install_args=("$1")
+    if [ "$BACKEND" = avd ]; then
+      local device_abi
+      device_abi="$(adb -s "$1" shell getprop ro.product.cpu.abi 2>/dev/null | tr -d '\r')"
+      [ -n "$device_abi" ] || { echo "[capture] could not read the AVD ABI"; exit 1; }
+      install_args+=(--abi "$device_abi")
+    fi
+    "$HERE/install-app.sh" "${install_args[@]}" "$arg"
     arg=""
   fi
   if [ -n "$arg" ]; then local uid; uid="$(app_uid "$1" "$arg")"; [ -n "$uid" ] || { echo "[capture] $arg not installed"; exit 1; }; own="-m owner --uid-owner $uid"; who="$arg (uid $uid)"; vpkg="$arg"; fi

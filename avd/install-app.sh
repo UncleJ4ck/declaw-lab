@@ -2,7 +2,7 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: $(basename "$0") SERIAL [--abi arm64-v8a|armeabi-v7a] APK|APKM|XAPK|DIR" >&2
+  echo "usage: $(basename "$0") SERIAL [--abi arm64-v8a|armeabi-v7a|x86_64|x86] APK|APKM|XAPK|DIR" >&2
   exit 2
 }
 
@@ -25,8 +25,8 @@ fi
 source=$1
 
 case $abi in
-  ""|arm64-v8a|armeabi-v7a) ;;
-  *) fail_input "unsupported ABI '$abi' (use arm64-v8a or armeabi-v7a)" ;;
+  ""|arm64-v8a|armeabi-v7a|x86_64|x86) ;;
+  *) fail_input "unsupported ABI '$abi' (use arm64-v8a, armeabi-v7a, x86_64, or x86)" ;;
 esac
 
 command -v adb >/dev/null 2>&1 || {
@@ -153,11 +153,12 @@ native_present=$((has_arm64 || has_arm32 || has_x86_64 || has_x86))
 effective_abi=$abi
 if [[ -n $abi ]]; then
   requested_present=0
-  if [[ $abi == arm64-v8a ]]; then
-    requested_present=$has_arm64
-  else
-    requested_present=$has_arm32
-  fi
+  case $abi in
+    arm64-v8a) requested_present=$has_arm64 ;;
+    armeabi-v7a) requested_present=$has_arm32 ;;
+    x86_64) requested_present=$has_x86_64 ;;
+    x86) requested_present=$has_x86 ;;
+  esac
   if ((native_present && ! requested_present)); then
     fail_input "requested ABI $abi is not present in the native APK set"
   fi

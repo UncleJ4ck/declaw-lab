@@ -242,6 +242,31 @@ test_installer() {
     fail "foreign multi-ABI feature survived armeabi-v7a filtering"
   fi
 
+  : >"$install_log"
+  : >"$argv_log"
+  PATH="$FAKES:$PATH" FAKE_ADB_PROFILE=installer \
+    FAKE_ADB_INSTALL_LOG="$install_log" FAKE_ADB_ARGV_LOG="$argv_log" \
+    "$ROOT/avd/install-app.sh" test-serial --abi x86_64 \
+    "$tmp/mixed.apkm" >/dev/null
+  assert_line "$(<"$install_log")" \
+    $'install-multiple\tbase.apk\tforeign-multi.apk\tsplit_config.en.apk\tsplit_config.x86_64.apk'
+  grep -Fq -- "install-multiple -r --abi x86_64" "$argv_log" || \
+    fail "split APK install did not forward --abi x86_64 to adb"
+  if grep -Eq 'arm32|arm64|armeabi|split_config.x86.apk' "$install_log"; then
+    fail "non-selected ABI split survived x86_64 filtering"
+  fi
+
+  : >"$install_log"
+  : >"$argv_log"
+  PATH="$FAKES:$PATH" FAKE_ADB_PROFILE=installer \
+    FAKE_ADB_INSTALL_LOG="$install_log" FAKE_ADB_ARGV_LOG="$argv_log" \
+    "$ROOT/avd/install-app.sh" test-serial --abi x86 \
+    "$tmp/mixed.apkm" >/dev/null
+  assert_line "$(<"$install_log")" \
+    $'install-multiple\tbase.apk\tsplit_config.en.apk\tsplit_config.x86.apk'
+  grep -Fq -- "install-multiple -r --abi x86" "$argv_log" || \
+    fail "split APK install did not forward --abi x86 to adb"
+
   mkdir "$tmp/incompatible-base-source"
   make_apk "$tmp/incompatible-base-source/base.apk" \
     lib/arm64-v8a/libbase.so
@@ -281,7 +306,7 @@ test_installer() {
   assert_status 2 "$ROOT/avd/install-app.sh" test-serial "$tmp/empty-dir"
   assert_status 2 "$ROOT/avd/install-app.sh" test-serial "$tmp/malformed.apkm"
   assert_status 2 "$ROOT/avd/install-app.sh" test-serial "$tmp/empty.apkm"
-  assert_status 2 "$ROOT/avd/install-app.sh" test-serial --abi x86 "$tmp/demo.apk"
+  assert_status 2 "$ROOT/avd/install-app.sh" test-serial --abi riscv64 "$tmp/demo.apk"
   assert_status 2 "$ROOT/avd/install-app.sh" test-serial "$tmp/does-not-exist.apkm"
 
   set +e
@@ -308,12 +333,28 @@ set -u
 if [[ -n ${FAKE_LAB_COMMAND_LOG:-} ]]; then
   { printf 'adb'; printf '\t%q' "$@"; printf '\n'; } >>"$FAKE_LAB_COMMAND_LOG"
 fi
+if [[ ${FAKE_FORBID_ADB:-0} == 1 ]]; then
+  echo "fake adb: device access was not allowed" >&2
+  exit 97
+fi
+if [[ ${1:-} == -s && ${3:-} == get-state ]]; then
+  if [[ ${FAKE_ADB_PROFILE:-} == status-hang ]]; then
+    /usr/bin/sleep 5
+    exit 0
+  fi
+  if [[ ${FAKE_ADB_PROFILE:-} != unreachable ]]; then
+    echo device
+    exit 0
+  fi
+fi
 case "${1:-}:${2:-}:${3:-}:${4:-}:${5:-}" in
+  devices::::) printf 'List of devices attached\nemulator-5554\tdevice\n'; exit 0 ;;
   connect:*) echo "connected to ${2:-}"; exit 0 ;;
   -s:*:shell:getprop:sys.boot_completed) echo 1; exit 0 ;;
-  -s:*:get-state:*) echo device; exit 0 ;;
   -s:*:shell:echo:OK) echo OK; exit 0 ;;
   -s:*:root:*) echo "restarting adbd as root"; exit 0 ;;
+  -s:*:wait-for-device:*) exit 0 ;;
+  -s:*:remount:*) exit 0 ;;
 esac
 if [[ ${1:-} == -s && ${3:-} == shell ]]; then
   remote="${*:4}"
@@ -326,11 +367,15 @@ fi
 exec "$REAL_FAKE_ADB" "$@"
 ''',
     "pgrep": r'''#!/usr/bin/env bash
+if [[ -n ${FAKE_LAB_COMMAND_LOG:-} ]]; then
+  { printf 'pgrep'; printf '\t%q' "$@"; printf '\n'; } >>"$FAKE_LAB_COMMAND_LOG"
+fi
 if [[ ${FAKE_FORBID_PGREP:-0} == 1 ]]; then
   echo "fake pgrep: qemu inspection was not allowed" >&2
   exit 97
 fi
-exit 0
+[[ ${FAKE_PGREP_RESULT:-hit} != miss ]]
+exit $?
 ''',
     "sleep": "#!/usr/bin/env bash\nexit 0\n",
     "scrcpy": r'''#!/usr/bin/env bash
@@ -341,8 +386,24 @@ exit 0
 { printf 'declaw'; printf '\t%q' "$@"; printf '\n'; } >>"$FAKE_LAB_COMMAND_LOG"
 exit 0
 ''',
-    "curl": "#!/usr/bin/env bash\necho 'fake curl: network forbidden' >&2\nexit 97\n",
-    "qemu-system-aarch64": "#!/usr/bin/env bash\necho 'fake qemu: boot forbidden' >&2\nexit 97\n",
+    "curl": r'''#!/usr/bin/env bash
+[[ -z ${FAKE_LAB_COMMAND_LOG:-} ]] || printf 'curl\n' >>"$FAKE_LAB_COMMAND_LOG"
+echo 'fake curl: network forbidden' >&2
+exit 97
+''',
+    "qemu-system-aarch64": r'''#!/usr/bin/env bash
+[[ -z ${FAKE_LAB_COMMAND_LOG:-} ]] || printf 'qemu-system-aarch64\n' >>"$FAKE_LAB_COMMAND_LOG"
+echo 'fake qemu: boot forbidden' >&2
+exit 97
+''',
+    "emulator": r'''#!/usr/bin/env bash
+if [[ ${1:-} == -list-avds ]]; then
+  echo declaw_x86_64
+  exit 0
+fi
+echo 'fake emulator: boot forbidden' >&2
+exit 97
+''',
 }
 for name, body in scripts.items():
     path = bin_dir / name
@@ -376,6 +437,29 @@ test_dispatch() {
   : >"$install_log"
   make_dispatch_fakes "$bin"
 
+  assert_qemu_install_preflight_rejects() {
+    local expected=$1
+    shift
+    : >"$log"
+    set +e
+    output=$(FAKE_LAB_COMMAND_LOG="$log" FAKE_FORBID_ADB=1 \
+      FAKE_FORBID_PGREP=1 run_lab "$home" "$bin" qemu install "$@" 2>&1)
+    status=$?
+    set -e
+    [[ $status -eq 2 ]] || {
+      printf '%s\n' "$output" >&2
+      fail "invalid qemu install returned $status, expected 2: $*"
+    }
+    grep -Fq -- "$expected" <<<"$output" || {
+      printf '%s\n' "$output" >&2
+      fail "invalid qemu install omitted useful error '$expected': $*"
+    }
+    [[ ! -s $log ]] || {
+      printf '%s\n' "$(<"$log")" >&2
+      fail "invalid qemu install accessed a process or device before local validation: $*"
+    }
+  }
+
   # `check` is an inspection-only command: it must work with no image and must
   # neither inspect the host qemu process nor enter the boot/download paths.
   rm -f "$home/Android/lineage-arm64/vda.raw"
@@ -396,6 +480,21 @@ test_dispatch() {
   : >"$home/Android/lineage-arm64/vda.raw"
   : >"$log"
   make_apk "$tmp/demo app.apk" lib/arm64-v8a/libdemo.so
+  assert_qemu_install_preflight_rejects \
+    "usage: lab qemu install [--abi arm64-v8a|armeabi-v7a] APP"
+  assert_qemu_install_preflight_rejects \
+    "[install] ERROR: app path not found: $tmp/missing.apk" \
+    "$tmp/missing.apk"
+  assert_qemu_install_preflight_rejects \
+    "[install] ERROR: expected exactly one APP path" \
+    "$tmp/demo app.apk" extra
+  assert_qemu_install_preflight_rejects \
+    "[install] ERROR: --abi requires a value and APP path" \
+    --abi
+  assert_qemu_install_preflight_rejects \
+    "[install] ERROR: unsupported qemu ABI x86_64 (expected arm64-v8a or armeabi-v7a)" \
+    --abi x86_64 "$tmp/demo app.apk"
+
   FAKE_LAB_COMMAND_LOG="$log" FAKE_ADB_LOG="$log" \
     FAKE_ADB_ARGV_LOG="$argv_log" FAKE_ADB_INSTALL_LOG="$install_log" \
     run_lab "$home" "$bin" qemu install --abi arm64-v8a "$tmp/demo app.apk" >/dev/null
@@ -423,10 +522,33 @@ test_dispatch() {
   grep -Fq $'declaw\tcom.example.app\t--mode\tcapture\t-s\tlocalhost:6555' "$log" || \
     fail "qemu keylog was not recognized and dispatched"
 
-  output=$(FAKE_LAB_COMMAND_LOG="$log" run_lab "$home" "$bin" qemu status)
+  : >"$log"
+  output=$(FAKE_PGREP_RESULT=miss FAKE_LAB_COMMAND_LOG="$log" \
+    run_lab "$home" "$bin" qemu status)
+  assert_line "$output" "[qemu] host-process=not-found"
+  assert_line "$output" "[qemu] guest=reachable serial=localhost:6555"
   assert_line "$output" "[qemu] zygote=zygote64_32"
   assert_line "$output" "[qemu] abilist64=arm64-v8a"
   assert_line "$output" "[qemu] abilist32=armeabi-v7a,armeabi"
+  grep -Fq '\[q\]emu-system-aarch64' "$log" || \
+    fail "qemu status process match was not self-safe"
+
+  set +e
+  output=$(FAKE_ADB_PROFILE=unreachable FAKE_PGREP_RESULT=hit \
+    run_lab "$home" "$bin" qemu status 2>&1)
+  status=$?
+  set -e
+  [[ $status -eq 1 ]] || fail "qemu status unreachable guest returned $status, expected 1"
+  assert_line "$output" "[qemu] host-process=running"
+  assert_line "$output" "[qemu] guest=unreachable serial=localhost:6555"
+
+  set +e
+  output=$(FAKE_ADB_PROFILE=status-hang LAB_ADB_TIMEOUT=0.1 \
+    run_lab "$home" "$bin" qemu status 2>&1)
+  status=$?
+  set -e
+  [[ $status -eq 1 ]] || fail "qemu status hung adb returned $status, expected 1"
+  assert_line "$output" "[qemu] guest=unreachable serial=localhost:6555"
 
   mkdir "$tmp/splits" "$tmp/bundle-source"
   make_apk "$tmp/splits/base.apk" lib/arm64-v8a/libdemo.so
@@ -442,6 +564,27 @@ test_dispatch() {
     grep -Fq '[install] ERROR: adb install failed with status 42' <<<"$output" || \
       fail "capture did not route $path through install-app.sh"
   done
+
+  mkdir "$tmp/avd-bundle-source"
+  make_apk "$tmp/avd-bundle-source/base.apk"
+  make_apk "$tmp/avd-bundle-source/split_config.arm64_v8a.apk" \
+    lib/arm64-v8a/libdemo.so
+  make_apk "$tmp/avd-bundle-source/split_config.x86_64.apk" \
+    lib/x86_64/libdemo.so
+  make_bundle "$tmp/avd-mixed.apkm" "$tmp/avd-bundle-source"
+  : >"$argv_log"
+  : >"$install_log"
+  set +e
+  output=$(FAKE_ADB_PROFILE=avd FAKE_ADB_FAIL_INSTALL=1 \
+    FAKE_ADB_ARGV_LOG="$argv_log" FAKE_ADB_INSTALL_LOG="$install_log" \
+    run_lab "$home" "$bin" avd capture "$tmp/avd-mixed.apkm" 2>&1)
+  status=$?
+  set -e
+  [[ $status -eq 42 ]] || fail "AVD capture installer failure returned $status"
+  grep -Fq -- "install-multiple -r --abi x86_64" "$argv_log" || \
+    fail "AVD capture did not select its x86_64 ABI"
+  assert_line "$(<"$install_log")" \
+    $'install-multiple\tbase.apk\tsplit_config.x86_64.apk'
 
   output=$(run_lab "$home" "$bin" --help)
   grep -Fq 'check' <<<"$output" || fail "lab help omitted check"
