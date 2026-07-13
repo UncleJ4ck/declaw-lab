@@ -294,9 +294,167 @@ test_installer() {
   echo "PASS: installer"
 }
 
+make_dispatch_fakes() {
+  local bin=$1
+  mkdir -p "$bin"
+  python3 - "$bin" <<'PY'
+import pathlib
+import sys
+
+bin_dir = pathlib.Path(sys.argv[1])
+scripts = {
+    "adb": r'''#!/usr/bin/env bash
+set -u
+if [[ -n ${FAKE_LAB_COMMAND_LOG:-} ]]; then
+  { printf 'adb'; printf '\t%q' "$@"; printf '\n'; } >>"$FAKE_LAB_COMMAND_LOG"
+fi
+case "${1:-}:${2:-}:${3:-}:${4:-}:${5:-}" in
+  connect:*) echo "connected to ${2:-}"; exit 0 ;;
+  -s:*:shell:getprop:sys.boot_completed) echo 1; exit 0 ;;
+  -s:*:get-state:*) echo device; exit 0 ;;
+  -s:*:shell:echo:OK) echo OK; exit 0 ;;
+  -s:*:root:*) echo "restarting adbd as root"; exit 0 ;;
+esac
+if [[ ${1:-} == -s && ${3:-} == shell ]]; then
+  remote="${*:4}"
+  case "$remote" in
+    "setprop persist.sys.root_access 3; setprop service.adb.root 1; setprop ctl.restart adbd") exit 0 ;;
+    id) echo 'uid=0(root) gid=0(root)'; exit 0 ;;
+    "iptables -t nat -L OUTPUT -n") exit 0 ;;
+  esac
+fi
+exec "$REAL_FAKE_ADB" "$@"
+''',
+    "pgrep": r'''#!/usr/bin/env bash
+if [[ ${FAKE_FORBID_PGREP:-0} == 1 ]]; then
+  echo "fake pgrep: qemu inspection was not allowed" >&2
+  exit 97
+fi
+exit 0
+''',
+    "sleep": "#!/usr/bin/env bash\nexit 0\n",
+    "scrcpy": r'''#!/usr/bin/env bash
+[[ -z ${FAKE_LAB_COMMAND_LOG:-} ]] || printf 'scrcpy\n' >>"$FAKE_LAB_COMMAND_LOG"
+exit 0
+''',
+    "declaw": r'''#!/usr/bin/env bash
+{ printf 'declaw'; printf '\t%q' "$@"; printf '\n'; } >>"$FAKE_LAB_COMMAND_LOG"
+exit 0
+''',
+    "curl": "#!/usr/bin/env bash\necho 'fake curl: network forbidden' >&2\nexit 97\n",
+    "qemu-system-aarch64": "#!/usr/bin/env bash\necho 'fake qemu: boot forbidden' >&2\nexit 97\n",
+}
+for name, body in scripts.items():
+    path = bin_dir / name
+    path.write_text(body)
+    path.chmod(0o755)
+PY
+}
+
+run_lab() {
+  local home=$1 bin=$2
+  shift 2
+  HOME="$home" ANDROID_SDK_ROOT="$home/empty-sdk" \
+    PATH="$bin:$FAKES:$PATH" REAL_FAKE_ADB="$FAKES/adb" \
+    FAKE_ADB_PROFILE="${FAKE_ADB_PROFILE:-multilib}" \
+    "$ROOT/avd/lab" "$@"
+}
+
+test_dispatch() {
+  local tmp home bin log argv_log install_log output status check_line install_line path
+  tmp=$(mktemp -d)
+  home="$tmp/home"
+  bin="$tmp/bin"
+  log="$tmp/commands.log"
+  argv_log="$tmp/argv.log"
+  install_log="$tmp/install.log"
+  trap 'rm -rf "$tmp"' RETURN
+  mkdir -p "$home/Android/lineage-arm64" "$home/empty-sdk"
+  : >"$home/Android/lineage-arm64/vda.raw"
+  : >"$log"
+  : >"$argv_log"
+  : >"$install_log"
+  make_dispatch_fakes "$bin"
+
+  # `check` is an inspection-only command: it must work with no image and must
+  # neither inspect the host qemu process nor enter the boot/download paths.
+  rm -f "$home/Android/lineage-arm64/vda.raw"
+  output=$(FAKE_FORBID_PGREP=1 FAKE_LAB_COMMAND_LOG="$log" \
+    run_lab "$home" "$bin" qemu check)
+  assert_line "$output" "[check] PASS: one Android 16 guest runs arm64-v8a and armeabi-v7a apps"
+  if grep -Eq 'curl|qemu-system-aarch64' "$log"; then
+    fail "qemu check attempted a download or boot"
+  fi
+  set +e
+  output=$(FAKE_FORBID_PGREP=1 FAKE_ADB_PROFILE=arm64only \
+    run_lab "$home" "$bin" qemu check 2>&1)
+  status=$?
+  set -e
+  [[ $status -eq 2 ]] || fail "qemu check returned $status instead of checker status 2"
+  assert_line "$output" "[check] FAIL: guest does not satisfy the ARM32 + ARM64 Android 16 contract"
+
+  : >"$home/Android/lineage-arm64/vda.raw"
+  : >"$log"
+  make_apk "$tmp/demo app.apk" lib/arm64-v8a/libdemo.so
+  FAKE_LAB_COMMAND_LOG="$log" FAKE_ADB_LOG="$log" \
+    FAKE_ADB_ARGV_LOG="$argv_log" FAKE_ADB_INSTALL_LOG="$install_log" \
+    run_lab "$home" "$bin" qemu install --abi arm64-v8a "$tmp/demo app.apk" >/dev/null
+  grep -Fq -- "install -r --abi arm64-v8a" "$argv_log" || \
+    fail "lab install did not preserve --abi for install-app.sh"
+  grep -Fq -- "$(printf '%q' "$tmp/demo app.apk")" "$argv_log" || \
+    fail "lab install did not preserve an app path containing spaces"
+  check_line=$(grep -nF 'getprop ro.zygote' "$log" | tail -1 | cut -d: -f1)
+  install_line=$(grep -n $' install ' "$log" | tail -1 | cut -d: -f1)
+  [[ -n $check_line && -n $install_line && $check_line -lt $install_line ]] || \
+    fail "lab install did not check multilib capability before adb install"
+
+  : >"$install_log"
+  set +e
+  FAKE_ADB_PROFILE=arm64only FAKE_ADB_INSTALL_LOG="$install_log" \
+    run_lab "$home" "$bin" qemu install "$tmp/demo app.apk" >/dev/null 2>&1
+  status=$?
+  set -e
+  [[ $status -eq 2 ]] || fail "lab install on arm64-only guest returned $status, expected 2"
+  [[ ! -s $install_log ]] || fail "lab install called adb after the multilib check failed"
+
+  : >"$log"
+  FAKE_LAB_COMMAND_LOG="$log" DECLAW="$bin/declaw" \
+    run_lab "$home" "$bin" qemu keylog com.example.app >/dev/null
+  grep -Fq $'declaw\tcom.example.app\t--mode\tcapture\t-s\tlocalhost:6555' "$log" || \
+    fail "qemu keylog was not recognized and dispatched"
+
+  output=$(FAKE_LAB_COMMAND_LOG="$log" run_lab "$home" "$bin" qemu status)
+  assert_line "$output" "[qemu] zygote=zygote64_32"
+  assert_line "$output" "[qemu] abilist64=arm64-v8a"
+  assert_line "$output" "[qemu] abilist32=armeabi-v7a,armeabi"
+
+  mkdir "$tmp/splits" "$tmp/bundle-source"
+  make_apk "$tmp/splits/base.apk" lib/arm64-v8a/libdemo.so
+  make_apk "$tmp/bundle-source/base.apk" lib/arm64-v8a/libdemo.so
+  make_bundle "$tmp/demo.apkm" "$tmp/bundle-source"
+  make_bundle "$tmp/demo.xapk" "$tmp/bundle-source"
+  for path in "$tmp/demo app.apk" "$tmp/demo.apkm" "$tmp/demo.xapk" "$tmp/splits"; do
+    set +e
+    output=$(FAKE_ADB_FAIL_INSTALL=1 run_lab "$home" "$bin" qemu capture "$path" 2>&1)
+    status=$?
+    set -e
+    [[ $status -eq 42 ]] || fail "capture installer failure for $path returned $status"
+    grep -Fq '[install] ERROR: adb install failed with status 42' <<<"$output" || \
+      fail "capture did not route $path through install-app.sh"
+  done
+
+  output=$(run_lab "$home" "$bin" --help)
+  grep -Fq 'check' <<<"$output" || fail "lab help omitted check"
+  grep -Fq 'install' <<<"$output" || fail "lab help omitted install"
+  grep -Fq 'APKM' <<<"$output" || fail "lab help omitted APKM support"
+
+  echo "PASS: dispatch"
+}
+
 case ${1:-all} in
   checker) test_checker ;;
   installer) test_installer ;;
-  all) test_checker; test_installer ;;
+  dispatch) test_dispatch ;;
+  all) test_checker; test_installer; test_dispatch ;;
   *) fail "unknown test group: ${1:-}" ;;
 esac

@@ -6,10 +6,12 @@
 #         declaw's arm64-only primitives (mempatch, HWBP). Slower.
 #   avd   x86_64 Android (Google emulator, KVM, rooted). Fast; OkHttp/NSC/Flutter.
 #
-# Usage: lab [qemu|avd] [command | apk | package]     default: qemu, boot+root+UI+shell
+# Usage: lab [qemu|avd] [command | app | package]     default: qemu, boot+root+UI+shell
 #   (nothing)   boot (if needed) + root + UI window + root shell
-#   APK | PKG   boot + install (if APK) + send that app's HTTPS to Burp + UI  [pentest one-liner]
-#   capture [X] same as passing X: X = .apk to install, a package to scope, or nothing for
+#   APP | PKG   boot + install (APK/APKM/XAPK/split dir) + send HTTPS to Burp + UI
+#   install [--abi ABI] APP  boot, verify ARM32+ARM64 support, then install (qemu)
+#   check       inspect the already-running qemu guest's ARM32+ARM64 runtime (no boot)
+#   capture [X] same as passing X: X = local app bundle, package to scope, or nothing for
 #               all apps. Decrypts to Burp (127.0.0.1:8080) and capture/traffic.log.
 #   keylog PKG  QUIC/HTTP3 (cronet) is invisible to a MITM: run declaw's friTap key+pcap
 #               capture on this device (SSLKEYLOG + pcap, decrypt in Wireshark).
@@ -33,14 +35,14 @@ if [ ! -x "${JAVA_HOME:-/nonexistent}/bin/java" ]; then
   done
 fi
 
-usage() { sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 case "${1:-}" in -h|--help|help) usage 0 ;; esac
 # Backend is an optional first arg. Then a known subcommand runs as-is; anything else
 # (a bare apk/dir/package, or nothing) means the default `go`, which captures that target.
 BACKEND=qemu
 case "${1:-}" in qemu|avd) BACKEND="$1"; shift ;; esac
 case "${1:-}" in
-  go|provision|up|root|shell|ui|capture|probe|status|down) CMD="$1"; shift ;;
+  go|provision|up|root|shell|ui|capture|keylog|probe|check|install|status|down) CMD="$1"; shift ;;
   *) CMD=go ;;   # empty or a bare apk/pkg -> go [target]
 esac
 
@@ -60,8 +62,19 @@ qemu_down() {
 }
 qemu_status() {
   pgrep -f 'qemu-system-aarch64.*declaw-lineage' >/dev/null && echo "[qemu] running" || { echo "[qemu] stopped"; return; }
-  adb connect "$QDEV" >/dev/null 2>&1
-  adb -s "$QDEV" shell 'echo up: uid=$(id -u) $(getprop ro.build.version.release) $(uname -m) selinux=$(getenforce)' 2>/dev/null | tr -d '\r'
+  adb connect "$QDEV" >/dev/null 2>&1 || true
+  local uid release kernel selinux zygote abilist64 abilist32
+  uid="$(adb -s "$QDEV" shell id -u 2>/dev/null | tr -d '\r' || true)"
+  release="$(adb -s "$QDEV" shell getprop ro.build.version.release 2>/dev/null | tr -d '\r' || true)"
+  kernel="$(adb -s "$QDEV" shell uname -m 2>/dev/null | tr -d '\r' || true)"
+  selinux="$(adb -s "$QDEV" shell getenforce 2>/dev/null | tr -d '\r' || true)"
+  zygote="$(adb -s "$QDEV" shell getprop ro.zygote 2>/dev/null | tr -d '\r' || true)"
+  abilist64="$(adb -s "$QDEV" shell getprop ro.product.cpu.abilist64 2>/dev/null | tr -d '\r' || true)"
+  abilist32="$(adb -s "$QDEV" shell getprop ro.product.cpu.abilist32 2>/dev/null | tr -d '\r' || true)"
+  echo "[qemu] up: uid=${uid:-?} release=${release:-?} kernel=${kernel:-?} selinux=${selinux:-?}"
+  echo "[qemu] zygote=${zygote:-<unreachable>}"
+  echo "[qemu] abilist64=${abilist64:-<empty>}"
+  echo "[qemu] abilist32=${abilist32:-<empty>}"
 }
 qemu_ensure() {  # boot (if needed) + wait + root; returns with the device up and rooted
   [ -f "$HOME/Android/lineage-arm64/vda.raw" ] || { echo "[qemu] run 'lab qemu provision' first"; exit 1; }
@@ -83,6 +96,15 @@ qemu_go() {  # $1 optional capture target (apk / split dir / package)
     echo "[qemu] root shell. device + window stay up on exit ('lab qemu down' to stop)."
     exec adb -s "$QDEV" shell
   fi
+}
+qemu_check() {
+  adb connect "$QDEV" >/dev/null 2>&1 || true
+  "$HERE/check-multilib.sh" "$QDEV"
+}
+qemu_install() {
+  qemu_ensure
+  "$HERE/check-multilib.sh" "$QDEV"
+  "$HERE/install-app.sh" "$QDEV" "$@"
 }
 
 # ---------------------------------------------------------------- avd (x86_64)
@@ -209,7 +231,7 @@ capture_verify() {  # $1 serial(unused)  $2 pkg-or-empty
     echo "[verify] no app TLS seen yet; drive the app in the UI window and watch below."
   fi
 }
-# capture [apk|pkg]: the one decrypt command. With an .apk (or split dir) it installs it
+# capture [app|pkg]: the one decrypt command. With a local APK/APKM/XAPK/split dir it installs it
 # first; with a package it scopes to that app; with nothing it redirects all HTTPS. Then
 # it points the app's 443 at the host MITM and follows the decrypted log (Ctrl-C to stop
 # watching; the redirect stays until `down`). Decrypted flows also go to Burp if it is up.
@@ -220,7 +242,7 @@ do_capture() {
   local arg="${2:-}" own="" who="all apps" vpkg=""
   if [ -n "$arg" ] && [ -e "$arg" ]; then
     echo "[capture] installing $arg"
-    if [ -d "$arg" ]; then adb -s "$1" install-multiple -r "$arg"/*.apk; else adb -s "$1" install -r "$arg"; fi
+    "$HERE/install-app.sh" "$1" "$arg"
     arg=""
   fi
   if [ -n "$arg" ]; then local uid; uid="$(app_uid "$1" "$arg")"; [ -n "$uid" ] || { echo "[capture] $arg not installed"; exit 1; }; own="-m owner --uid-owner $uid"; who="$arg (uid $uid)"; vpkg="$arg"; fi
@@ -305,6 +327,8 @@ case "$BACKEND:$CMD" in
   qemu:go)        qemu_go "${1:-}" ;;
   qemu:capture)   qemu_ensure; do_capture "$QDEV" "${1:-}" ;;
   qemu:keylog)    qemu_ensure; do_keylog "$QDEV" "${1:-}" ;;
+  qemu:check)     qemu_check ;;
+  qemu:install)   qemu_install "$@" ;;
   qemu:probe)     do_probe "$QDEV" "$@" ;;
   qemu:provision) "$HERE/provision.sh" ;;
   qemu:up)        qemu_up ;;
