@@ -618,7 +618,7 @@ run_build_preflight() {
 }
 
 test_build() {
-  local tmp bin log output status root dist product valid_utm valid_ota
+  local tmp bin log output status root dist product utm_dir valid_utm valid_ota
   tmp=$(mktemp -d)
   bin="$tmp/bin"
   log="$tmp/network.log"
@@ -651,6 +651,13 @@ test_build() {
     "[build] repo=https://storage.googleapis.com/git-repo-downloads/repo-2.54 sha256=6cba294d6218bbd4a1500598207b3979c752c7a122aef9429e4d7fef688833b5"
   assert_line "$output" "[build] root=$root"
   assert_line "$output" "[build] dist=$dist"
+  assert_line "$output" "export GIT_CONFIG_GLOBAL=$root/gitconfig"
+  assert_line "$output" "git lfs install --skip-repo"
+  assert_line "$output" \
+    "repo init -u https://github.com/LineageOS/android.git -b lineage-23.2 --depth=1 --no-clone-bundle --git-lfs"
+  assert_line "$output" "export AB_OTA_UPDATER=false"
+  assert_line "$output" \
+    'export ROOMSERVICE_BRANCHES="lineage-23.1 lineage-23.0"'
   assert_line "$output" "source $root/source/build/envsetup.sh"
   assert_line "$output" "breakfast virtio_arm64 user"
   assert_line "$output" "m vm-utm-zip otapackage"
@@ -660,9 +667,20 @@ test_build() {
   fi
   [[ ! -s $log ]] || fail "builder dry run invoked a network/source command"
 
-  product="$tmp/product"
-  mkdir -p "$product"
-  : >"$product/UTM-VM-lineage-test-virtio_arm64only.zip"
+  product="$tmp/product/out/target/product/virtio_arm64"
+  utm_dir="$product/VirtualMachine/UTM"
+  mkdir -p "$utm_dir"
+  set +e
+  output=$(bash -c 'source "$1"; find_utm_artifact "$2"' \
+    build-artifact-test "$ROOT/avd/build-lineage-multilib.sh" "$product" 2>&1)
+  status=$?
+  set -e
+  [[ $status -eq 2 ]] || fail "missing nested UTM artifact returned $status, expected 2"
+  grep -Fq -- "found 0" <<<"$output" || \
+    fail "missing nested UTM error omitted the match count"
+
+  : >"$utm_dir/UTM-VM-lineage-test-virtio_arm64only.zip"
+  : >"$product/UTM-VM-lineage-test-virtio_arm64.zip"
   set +e
   output=$(bash -c 'source "$1"; find_utm_artifact "$2"' \
     build-artifact-test "$ROOT/avd/build-lineage-multilib.sh" "$product" 2>&1)
@@ -670,25 +688,38 @@ test_build() {
   set -e
   [[ $status -eq 2 ]] || fail "wrong-product UTM artifact returned $status, expected 2"
   grep -Fq -- "found 0" <<<"$output" || \
-    fail "UTM discovery accepted an artifact for the wrong product"
+    fail "UTM discovery accepted the wrong product or product-root layout"
 
-  valid_utm="$product/UTM-VM-lineage-test-virtio_arm64.zip"
+  valid_utm="$utm_dir/UTM-VM-lineage-test-virtio_arm64.zip"
   : >"$valid_utm"
   output=$(bash -c 'source "$1"; find_utm_artifact "$2"' \
     build-artifact-test "$ROOT/avd/build-lineage-multilib.sh" "$product")
   [[ $output == "$valid_utm" ]] || fail "UTM discovery did not return the sole exact artifact"
-  : >"$product/UTM-VM-lineage-other-virtio_arm64.zip"
-  assert_status 2 bash -c 'source "$1"; find_utm_artifact "$2"' \
-    build-artifact-test "$ROOT/avd/build-lineage-multilib.sh" "$product"
+  : >"$utm_dir/UTM-VM-lineage-other-virtio_arm64.zip"
+  set +e
+  output=$(bash -c 'source "$1"; find_utm_artifact "$2"' \
+    build-artifact-test "$ROOT/avd/build-lineage-multilib.sh" "$product" 2>&1)
+  status=$?
+  set -e
+  [[ $status -eq 2 ]] || fail "ambiguous nested UTM artifacts returned $status, expected 2"
+  grep -Fq -- "found 2" <<<"$output" || \
+    fail "ambiguous nested UTM error omitted the match count"
 
-  valid_ota="$product/lineage-23.2-test-virtio_arm64.zip"
+  : >"$product/lineage-23.2-test-virtio_arm64.zip"
+  set +e
+  output=$(bash -c 'source "$1"; find_ota_artifact "$2"' \
+    build-artifact-test "$ROOT/avd/build-lineage-multilib.sh" "$product" 2>&1)
+  status=$?
+  set -e
+  [[ $status -eq 2 ]] || fail "non-exact OTA artifact returned $status, expected 2"
+  grep -Fq -- "found 0" <<<"$output" || \
+    fail "OTA discovery accepted a non-product output name"
+
+  valid_ota="$product/lineage_virtio_arm64-ota.zip"
   : >"$valid_ota"
   output=$(bash -c 'source "$1"; find_ota_artifact "$2"' \
     build-artifact-test "$ROOT/avd/build-lineage-multilib.sh" "$product")
   [[ $output == "$valid_ota" ]] || fail "OTA discovery did not return the sole exact artifact"
-  : >"$product/lineage-23.2-other-virtio_arm64.zip"
-  assert_status 2 bash -c 'source "$1"; find_ota_artifact "$2"' \
-    build-artifact-test "$ROOT/avd/build-lineage-multilib.sh" "$product"
 
   : >"$log"
   set +e

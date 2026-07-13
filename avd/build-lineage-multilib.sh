@@ -7,6 +7,8 @@ readonly LINEAGE_VARIANT=user
 readonly LINEAGE_ABIS=arm64-v8a,armeabi-v7a,armeabi
 readonly LINEAGE_ZYGOTE=zygote64_32
 readonly LINEAGE_MANIFEST_URL=https://github.com/LineageOS/android.git
+readonly AB_OTA_UPDATER_VALUE=false
+readonly ROOMSERVICE_BRANCHES_VALUE='lineage-23.1 lineage-23.0'
 
 readonly BUILDER_REPO=https://github.com/jqssun/android-lineage-qemu.git
 readonly BUILDER_REF=v2026.07.09
@@ -23,6 +25,7 @@ SOURCE_DIR=${LINEAGE_SOURCE_DIR:-$BUILD_ROOT/source}
 BUILDER_DIR=${BUILDER_SNAPSHOT_DIR:-$BUILD_ROOT/builder-snapshot}
 TOOLS_DIR=${BUILD_TOOLS_DIR:-$BUILD_ROOT/tools}
 REPO_LAUNCHER=${REPO_LAUNCHER:-$TOOLS_DIR/repo}
+BUILD_GIT_CONFIG_GLOBAL=$BUILD_ROOT/gitconfig
 BUILD_TIMESTAMP=${BUILD_TIMESTAMP:-$(date -u +%Y%m%dT%H%M%SZ)}
 DIST_DIR=${BUILD_DIST_DIR:-$BUILD_ROOT/dist/${BUILD_TIMESTAMP}-${LINEAGE_TARGET}}
 
@@ -46,6 +49,11 @@ print_contract() {
 }
 
 print_build_commands() {
+  echo "export GIT_CONFIG_GLOBAL=$BUILD_GIT_CONFIG_GLOBAL"
+  echo "git lfs install --skip-repo"
+  echo "repo init -u $LINEAGE_MANIFEST_URL -b $LINEAGE_BRANCH --depth=1 --no-clone-bundle --git-lfs"
+  echo "export AB_OTA_UPDATER=$AB_OTA_UPDATER_VALUE"
+  echo "export ROOMSERVICE_BRANCHES=\"$ROOMSERVICE_BRANCHES_VALUE\""
   echo "source $SOURCE_DIR/build/envsetup.sh"
   echo "breakfast $LINEAGE_TARGET $LINEAGE_VARIANT"
   echo "m vm-utm-zip otapackage"
@@ -151,6 +159,11 @@ install_repo_launcher() {
   mv -f -- "$download" "$REPO_LAUNCHER"
 }
 
+configure_git_lfs() {
+  export GIT_CONFIG_GLOBAL=$BUILD_GIT_CONFIG_GLOBAL
+  git lfs install --skip-repo
+}
+
 prepare_builder_snapshot() {
   local actual_commit
   if [[ ! -e $BUILDER_DIR ]]; then
@@ -173,7 +186,7 @@ sync_sources() {
   (
     cd "$SOURCE_DIR"
     "$REPO_LAUNCHER" init -u "$LINEAGE_MANIFEST_URL" -b "$LINEAGE_BRANCH" \
-      --depth=1 --no-clone-bundle
+      --depth=1 --no-clone-bundle --git-lfs
     "$REPO_LAUNCHER" sync --current-branch --no-tags --no-clone-bundle \
       --optimized-fetch --prune -j"$jobs"
   )
@@ -185,6 +198,8 @@ build_target() {
 
   (
     cd "$SOURCE_DIR"
+    export AB_OTA_UPDATER=$AB_OTA_UPDATER_VALUE
+    export ROOMSERVICE_BRANCHES=$ROOMSERVICE_BRANCHES_VALUE
     # Android's envsetup is not guaranteed to be nounset-clean.
     set +u
     # shellcheck disable=SC1091
@@ -198,9 +213,11 @@ build_target() {
 single_artifact() {
   local product_dir=$1 pattern=$2 label=$3
   local -a matches=()
-  mapfile -d '' -t matches < <(
-    find "$product_dir" -maxdepth 1 -type f -name "$pattern" -print0 | sort -z
-  )
+  if [[ -d $product_dir ]]; then
+    mapfile -d '' -t matches < <(
+      find "$product_dir" -maxdepth 1 -type f -name "$pattern" -print0 | sort -z
+    )
+  fi
   if ((${#matches[@]} != 1)); then
     die "expected exactly one $label matching $product_dir/$pattern; found ${#matches[@]}"
   fi
@@ -208,11 +225,12 @@ single_artifact() {
 }
 
 find_utm_artifact() {
-  single_artifact "$1" "UTM-VM-*-${LINEAGE_TARGET}.zip" 'UTM ZIP'
+  single_artifact "$1/VirtualMachine/UTM" \
+    "UTM-VM-*-${LINEAGE_TARGET}.zip" 'UTM ZIP'
 }
 
 find_ota_artifact() {
-  single_artifact "$1" "lineage-*-${LINEAGE_TARGET}.zip" 'OTA ZIP'
+  single_artifact "$1" "lineage_${LINEAGE_TARGET}-ota.zip" 'OTA ZIP'
 }
 
 emit_dist() {
@@ -261,6 +279,9 @@ emit_dist() {
     printf 'zygote=%s\n' "$LINEAGE_ZYGOTE"
     printf 'repo_launcher_url=%s\n' "$REPO_LAUNCHER_URL"
     printf 'repo_launcher_sha256=%s\n' "$REPO_LAUNCHER_SHA256"
+    printf 'git_config_global=%s\n' "$BUILD_GIT_CONFIG_GLOBAL"
+    printf 'ab_ota_updater=%s\n' "$AB_OTA_UPDATER_VALUE"
+    printf 'roomservice_branches=%s\n' "$ROOMSERVICE_BRANCHES_VALUE"
   } >"$stage/build-metadata.txt"
 
   (
@@ -292,6 +313,7 @@ main() {
   fi
 
   mkdir -p -- "$BUILD_ROOT"
+  configure_git_lfs
   prepare_builder_snapshot
   install_repo_launcher
   sync_sources
