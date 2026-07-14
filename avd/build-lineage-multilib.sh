@@ -336,12 +336,12 @@ build_target() {
     export PATH=$TOOLS_DIR:$PATH
     export AB_OTA_UPDATER=$AB_OTA_UPDATER_VALUE
     export ROOMSERVICE_BRANCHES=$ROOMSERVICE_BRANCHES_VALUE
-    # Android's envsetup is not guaranteed to be nounset-clean.
+    # Android's envsetup/breakfast helpers are not guaranteed to be nounset-clean.
     set +u
     # shellcheck disable=SC1091
     source build/envsetup.sh
-    set -u
     breakfast "$LINEAGE_TARGET" "$LINEAGE_VARIANT"
+    set -u
     clean_target_artifacts "$SOURCE_DIR/out/target/product/$LINEAGE_TARGET"
     m -j"$BUILD_JOBS" vm-utm-zip otapackage
   )

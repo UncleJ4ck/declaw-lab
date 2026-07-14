@@ -473,7 +473,7 @@ test_acceptance() {
   instagram_sha=$(sha256sum "$instagram_bundle" | awk '{print $1}')
 
   run_acceptance() {
-    PATH="$FAKES:$PATH" FAKE_ADB_PROFILE=accept FAKE_ADB_LOG="$log" \
+    PATH="$FAKES:$PATH" FAKE_ADB_PROFILE="${FAKE_ACCEPT_PROFILE:-accept}" FAKE_ADB_LOG="$log" \
       FAKE_ADB_INSTALL_LOG="$install_log" \
       FAKE_ACCEPT_INSTALLED_ROOT="$installed_root" \
       FAKE_ACCEPT_BOOT_CALLS_FILE="$boot_calls" ACCEPT_POLL_ATTEMPTS=3 \
@@ -656,7 +656,7 @@ test_acceptance() {
 
   reset_acceptance_logs
   set +e
-  output=$(FAKE_ADB_PROFILE=hang ACCEPT_ADB_TIMEOUT=0.1 run_acceptance 2>&1)
+  output=$(FAKE_ADB_HANG_INSTALL=1 ACCEPT_ADB_TIMEOUT=0.1 run_acceptance 2>&1)
   status=$?
   set -e
   [[ $status -eq 1 ]] || fail "hung production installer returned $status, expected 1"
@@ -1378,6 +1378,7 @@ SH
   chmod +x "$tools_dir/repo" "$host_bin/repo"
   cat >"$source_dir/build/envsetup.sh" <<'SH'
 breakfast() {
+  : "$BUILD_VAR_CACHE_READY"
   printf 'breakfast\t%s\trepo=%s\ttmp=%s\n' \
     "$*" "$(command -v repo)" "$TMPDIR" >>"$FAKE_BUILD_TARGET_LOG"
   mkdir -p "$FAKE_BUILD_PRODUCT/VirtualMachine/UTM"

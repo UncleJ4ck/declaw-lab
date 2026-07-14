@@ -42,9 +42,9 @@ if [[ $command == shell ]]; then
 fi
 
 case "$command" in
-  install|install-multiple)
-    shift
-    abi=
+	  install|install-multiple)
+	    shift
+	    abi=
     [[ ${1:-} == -r ]] || {
       echo "fake adb: installer omitted -r" >&2
       exit 94
@@ -71,14 +71,18 @@ case "$command" in
         printf '\n'
       } >>"$FAKE_ADB_INSTALL_LOG"
     fi
-    for apk in "$@"; do
-      [[ -f $apk && $apk == *.apk ]] || {
-        echo "fake adb: invalid APK argument: $apk" >&2
-        exit 93
-      }
-    done
-    if [[ ${FAKE_ADB_FAIL_INSTALL:-0} == abis ]]; then
-      echo "Failure [INSTALL_FAILED_NO_MATCHING_ABIS]" >&2
+	    for apk in "$@"; do
+	      [[ -f $apk && $apk == *.apk ]] || {
+	        echo "fake adb: invalid APK argument: $apk" >&2
+	        exit 93
+	      }
+	    done
+	    if [[ ${FAKE_ADB_HANG_INSTALL:-0} == 1 ]]; then
+	      sleep 5
+	      exit 0
+	    fi
+	    if [[ ${FAKE_ADB_FAIL_INSTALL:-0} == abis ]]; then
+	      echo "Failure [INSTALL_FAILED_NO_MATCHING_ABIS]" >&2
       exit 1
     fi
     if [[ ${FAKE_ADB_FAIL_INSTALL:-0} == 1 ]]; then
