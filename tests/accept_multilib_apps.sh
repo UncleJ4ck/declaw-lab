@@ -6,7 +6,7 @@ CHECKER="$ROOT/avd/check-multilib.sh"
 INSTALLER="$ROOT/avd/install-app.sh"
 
 usage() {
-  echo "usage: $(basename "$0") --serial SERIAL --x X.apkm --instagram INSTAGRAM.apkm" >&2
+  echo "usage: $(basename "$0") [--serial SERIAL] --x X.apkm --instagram INSTAGRAM.apkm" >&2
   exit 2
 }
 
@@ -20,7 +20,7 @@ runtime_error() {
   exit 1
 }
 
-serial=
+serial=localhost:6555
 x_source=
 instagram_source=
 while (($#)); do
@@ -49,7 +49,7 @@ while (($#)); do
   esac
 done
 
-[[ -n $serial && -n $x_source && -n $instagram_source ]] || usage
+[[ -n $x_source && -n $instagram_source ]] || usage
 for source in "$x_source" "$instagram_source"; do
   [[ -f $source ]] || input_error "bundle not found: $source"
   [[ ${source,,} == *.apkm ]] || input_error "expected an APKM bundle: $source"
@@ -62,7 +62,7 @@ adb_timeout=${ACCEPT_ADB_TIMEOUT:-15}
   input_error "ACCEPT_POLL_ATTEMPTS must be a positive integer"
 [[ $poll_interval =~ ^[0-9]+([.][0-9]+)?$ ]] || \
   input_error "ACCEPT_POLL_INTERVAL must be a non-negative number"
-[[ $adb_timeout =~ ^[0-9]+([.][0-9]+)?[smhd]?$ ]] || \
+[[ $adb_timeout =~ ^([1-9][0-9]*([.][0-9]+)?|0[.][0-9]*[1-9][0-9]*)([smhd])?$ ]] || \
   input_error "ACCEPT_ADB_TIMEOUT has an invalid timeout value"
 
 for command in adb cp mktemp python3 sha256sum sort timeout; do
@@ -89,8 +89,9 @@ cp -- "$x_source" "$x_bundle"
 cp -- "$instagram_source" "$instagram_bundle"
 
 inspect_bundle() {
-  local bundle=$1 expected_package=$2 expected_abi=$3 output=$4
-  python3 - "$bundle" "$expected_package" "$expected_abi" >"$output" <<'PY'
+  local bundle=$1 expected_package=$2 expected_abi=$3 selected_dir=$4 output=$5
+  python3 - "$bundle" "$expected_package" "$expected_abi" "$selected_dir" >"$output" <<'PY'
+import hashlib
 import io
 import json
 import pathlib
@@ -102,6 +103,7 @@ import zipfile
 bundle = pathlib.Path(sys.argv[1])
 expected_package = sys.argv[2]
 expected_abi = sys.argv[3]
+selected_dir = pathlib.Path(sys.argv[4])
 
 
 def fail(message):
@@ -211,11 +213,15 @@ with archive:
         fail("APKM must contain exactly one base.apk")
 
     entries = []
+    apk_contents = {}
     all_native_abis = set()
     for name, member in apk_members:
-        abis = entry_abis(name, archive.read(member))
+        contents = archive.read(member)
+        basename = pathlib.PurePosixPath(name).name
+        abis = entry_abis(name, contents)
         all_native_abis.update(abis)
-        entries.append((pathlib.PurePosixPath(name).name, abis))
+        entries.append((basename, abis))
+        apk_contents[basename] = contents
     if expected_abi not in all_native_abis:
         fail(f"bundle {bundle} does not contain native ABI {expected_abi}")
 
@@ -229,20 +235,30 @@ with archive:
         fail("ABI filtering removed base.apk")
     selected.sort()
 
-print(package)
-print(version_code)
-print(version_name)
-print(",".join(selected))
+    selected_dir.mkdir(parents=True, exist_ok=True)
+    split_hashes = []
+    for basename in selected:
+        contents = apk_contents[basename]
+        (selected_dir / basename).write_bytes(contents)
+        split_hashes.append(f"{hashlib.sha256(contents).hexdigest()}  {basename}")
+
+    print(package)
+    print(version_code)
+    print(version_name)
+    print(",".join(selected))
+    print("|".join(split_hashes))
 PY
 }
 
 x_meta="$tmpdir/x.meta"
 instagram_meta="$tmpdir/instagram.meta"
-inspect_bundle "$x_bundle" com.twitter.android arm64-v8a "$x_meta"
-inspect_bundle "$instagram_bundle" com.instagram.android armeabi-v7a "$instagram_meta"
+x_selected_dir="$tmpdir/x-selected"
+instagram_selected_dir="$tmpdir/instagram-selected"
+inspect_bundle "$x_bundle" com.twitter.android arm64-v8a "$x_selected_dir" "$x_meta"
+inspect_bundle "$instagram_bundle" com.instagram.android armeabi-v7a "$instagram_selected_dir" "$instagram_meta"
 mapfile -t x_fields <"$x_meta"
 mapfile -t instagram_fields <"$instagram_meta"
-[[ ${#x_fields[@]} -eq 4 && ${#instagram_fields[@]} -eq 4 ]] || \
+[[ ${#x_fields[@]} -eq 5 && ${#instagram_fields[@]} -eq 5 ]] || \
   input_error "internal bundle inspection returned incomplete metadata"
 
 x_version=${x_fields[1]}
@@ -251,6 +267,8 @@ x_splits=${x_fields[3]}
 instagram_version=${instagram_fields[1]}
 instagram_version_name=${instagram_fields[2]}
 instagram_splits=${instagram_fields[3]}
+x_split_hashes=${x_fields[4]}
+instagram_split_hashes=${instagram_fields[4]}
 x_sha=$(sha256sum "$x_bundle" | awk '{print $1}')
 instagram_sha=$(sha256sum "$instagram_bundle" | awk '{print $1}')
 
@@ -319,8 +337,10 @@ assert_same_boot() {
 
 verify_installed_package() {
   local package=$1 expected_version=$2 expected_abi=$3 expected_splits=$4
-  local dump paths version abi line path basename actual_splits
-  local -a versions=() abis=() actual=() sorted=()
+  local expected_dir=$5 expected_hashes=$6
+  local dump paths version abi line path basename actual_splits pulled pull_dir
+  local expected_hash actual_hash expected_hash_lines
+  local -a versions=() abis=() actual=() actual_paths=() sorted=()
   adb_capture dump "reading installed metadata for $package" shell dumpsys package "$package"
   while IFS= read -r line; do
     if [[ $line =~ ^[[:space:]]*versionCode=([0-9]+)([[:space:]]|$) ]]; then
@@ -356,6 +376,7 @@ verify_installed_package() {
     [[ -n $basename && $basename == *.apk ]] || \
       runtime_error "invalid installed APK path for $package: $line"
     actual+=("$basename")
+    actual_paths+=("$path")
   done <<<"$paths"
   ((${#actual[@]} > 0)) || runtime_error "pm path returned no APKs for $package"
   mapfile -t sorted < <(printf '%s\n' "${actual[@]}" | sort -u)
@@ -364,6 +385,31 @@ verify_installed_package() {
   actual_splits=$(IFS=,; echo "${sorted[*]}")
   [[ $actual_splits == "$expected_splits" ]] || \
     runtime_error "$package installed splits do not match supplied bundle: actual=$actual_splits expected=$expected_splits"
+
+  pull_dir="$tmpdir/pulled-$package"
+  mkdir -p "$pull_dir"
+  for path in "${actual_paths[@]}"; do
+    basename=${path##*/}
+    pulled="$pull_dir/$basename"
+    adb_run "pulling installed APK $path for $package" pull "$path" "$pulled"
+    [[ -f $expected_dir/$basename ]] || \
+      runtime_error "no staged bundle APK for installed split $package/$basename"
+    expected_hash=$(sha256sum "$expected_dir/$basename" | awk '{print $1}')
+    actual_hash=$(sha256sum "$pulled" | awk '{print $1}')
+    [[ $actual_hash == "$expected_hash" ]] || \
+      runtime_error "$package installed APK bytes do not match supplied bundle for $basename: actual=$actual_hash expected=$expected_hash"
+  done
+  expected_hash_lines=${expected_hashes//|/$'\n'}
+  while IFS= read -r line; do
+    [[ -z $line ]] && continue
+    expected_hash=${line%%  *}
+    basename=${line#*  }
+    [[ -f $pull_dir/$basename ]] || \
+      runtime_error "installed APK missing after pull for $package/$basename"
+    actual_hash=$(sha256sum "$pull_dir/$basename" | awk '{print $1}')
+    [[ $actual_hash == "$expected_hash" ]] || \
+      runtime_error "$package installed APK bytes do not match supplied bundle for $basename: actual=$actual_hash expected=$expected_hash"
+  done <<<"$expected_hash_lines"
 }
 
 resolve_launcher() {
@@ -414,7 +460,7 @@ scan_native_failures() {
   local package=$1 logs bad
   adb_capture logs "reading controlled logcat for $package" shell logcat -d -v brief
   bad=$(grep -E \
-    'INSTALL_FAILED_NO_MATCHING_ABIS|UnsatisfiedLinkError|CANNOT LINK EXECUTABLE' \
+    'INSTALL_FAILED_NO_MATCHING_ABIS|UnsatisfiedLinkError|CANNOT LINK EXECUTABLE|wrong ELF class|unexpected e_machine|dlopen failed' \
     <<<"$logs" || true)
   if [[ -n $bad ]]; then
     echo "[accept] ERROR: native ABI/linker failure while launching $package" >&2
@@ -424,16 +470,19 @@ scan_native_failures() {
 }
 
 accept_app() {
-  local package=$1 abi=$2 expected_exe=$3 bundle=$4 version=$5 splits=$6
+  local package=$1 abi=$2 expected_exe=$3 bundle=$4 version=$5 splits=$6 selected_dir=$7 split_hashes=$8
   local component pid exe install_status start_output
 
   set +e
-  "$INSTALLER" "$serial" --abi "$abi" "$bundle"
+  timeout --kill-after=1 "$adb_timeout" "$INSTALLER" "$serial" --abi "$abi" "$bundle"
   install_status=$?
   set -e
+  if ((install_status == 124 || install_status == 137)); then
+    runtime_error "installer timed out while installing $package"
+  fi
   ((install_status == 0)) || exit "$install_status"
 
-  verify_installed_package "$package" "$version" "$abi" "$splits"
+  verify_installed_package "$package" "$version" "$abi" "$splits" "$selected_dir" "$split_hashes"
   resolve_launcher component "$package"
   adb_run "clearing controlled logcat for $package" shell logcat -c
   adb_run "force-stopping $package" shell am force-stop "$package"
@@ -448,8 +497,8 @@ accept_app() {
 }
 
 accept_app com.twitter.android arm64-v8a /system/bin/app_process64 \
-  "$x_bundle" "$x_version" "$x_splits"
+  "$x_bundle" "$x_version" "$x_splits" "$x_selected_dir" "$x_split_hashes"
 accept_app com.instagram.android armeabi-v7a /system/bin/app_process32 \
-  "$instagram_bundle" "$instagram_version" "$instagram_splits"
+  "$instagram_bundle" "$instagram_version" "$instagram_splits" "$instagram_selected_dir" "$instagram_split_hashes"
 assert_same_boot "at final acceptance"
 echo "[accept] PASS: both architectures launched during the same guest boot"

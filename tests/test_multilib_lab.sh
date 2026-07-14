@@ -451,11 +451,12 @@ test_installer() {
 
 test_acceptance() {
   local tmp x_bundle instagram_bundle wrong_identity wrong_abi wrong_version
-  local log install_log boot_calls output status x_sha instagram_sha
+  local log install_log boot_calls installed_root output status x_sha instagram_sha
   tmp=$(mktemp -d)
   log="$tmp/adb.log"
   install_log="$tmp/install.log"
   boot_calls="$tmp/boot-calls"
+  installed_root="$tmp/installed"
   trap 'rm -rf "$tmp"' RETURN
 
   x_bundle="$tmp/X production bundle.apkm"
@@ -474,6 +475,7 @@ test_acceptance() {
   run_acceptance() {
     PATH="$FAKES:$PATH" FAKE_ADB_PROFILE=accept FAKE_ADB_LOG="$log" \
       FAKE_ADB_INSTALL_LOG="$install_log" \
+      FAKE_ACCEPT_INSTALLED_ROOT="$installed_root" \
       FAKE_ACCEPT_BOOT_CALLS_FILE="$boot_calls" ACCEPT_POLL_ATTEMPTS=3 \
       ACCEPT_POLL_INTERVAL=0 "$ROOT/tests/accept_multilib_apps.sh" \
       --serial test-serial --x "$x_bundle" --instagram "$instagram_bundle"
@@ -482,6 +484,8 @@ test_acceptance() {
     : >"$log"
     : >"$install_log"
     : >"$boot_calls"
+    rm -rf "$installed_root"
+    mkdir -p "$installed_root"
   }
 
   assert_status 2 "$ROOT/tests/accept_multilib_apps.sh"
@@ -489,6 +493,18 @@ test_acceptance() {
     --serial test-serial --x "$x_bundle"
   assert_status 2 "$ROOT/tests/accept_multilib_apps.sh" \
     --serial test-serial --x "$tmp/missing.apkm" --instagram "$instagram_bundle"
+  assert_status 2 env ACCEPT_ADB_TIMEOUT=0 "$ROOT/tests/accept_multilib_apps.sh" \
+    --serial test-serial --x "$x_bundle" --instagram "$instagram_bundle"
+
+  reset_acceptance_logs
+  PATH="$FAKES:$PATH" FAKE_ADB_PROFILE=accept FAKE_ADB_LOG="$log" \
+    FAKE_ADB_INSTALL_LOG="$install_log" \
+    FAKE_ACCEPT_INSTALLED_ROOT="$installed_root" \
+    FAKE_ACCEPT_BOOT_CALLS_FILE="$boot_calls" ACCEPT_POLL_ATTEMPTS=3 \
+    ACCEPT_POLL_INTERVAL=0 "$ROOT/tests/accept_multilib_apps.sh" \
+    --x "$x_bundle" --instagram "$instagram_bundle" >/dev/null
+  grep -Eq -- '^-s localhost:6555( |$)' "$log" || \
+    fail "acceptance did not default to the qemu TCP serial"
 
   reset_acceptance_logs
   output=$(run_acceptance)
@@ -530,6 +546,21 @@ test_acceptance() {
   if grep -Ev '^-s test-serial( |$)' "$log" | grep -q .; then
     fail "acceptance made an adb call without the selected serial"
   fi
+
+  reset_acceptance_logs
+  mkdir -p "$installed_root/com.twitter.android"
+  printf 'pre-existing wrong base\n' >"$installed_root/com.twitter.android/base.apk"
+  printf 'pre-existing wrong arm64 split\n' \
+    >"$installed_root/com.twitter.android/split_config.arm64_v8a.apk"
+  printf 'pre-existing wrong language split\n' \
+    >"$installed_root/com.twitter.android/split_config.en.apk"
+  set +e
+  output=$(FAKE_ACCEPT_SKIP_INSTALL_COPY=com.twitter.android run_acceptance 2>&1)
+  status=$?
+  set -e
+  [[ $status -eq 1 ]] || fail "installed byte mismatch returned $status, expected 1"
+  grep -Fq -- 'installed APK bytes do not match supplied bundle' <<<"$output" || \
+    fail "installed byte mismatch omitted a useful error"
 
   reset_acceptance_logs
   set +e
@@ -587,6 +618,15 @@ test_acceptance() {
 
   reset_acceptance_logs
   set +e
+  output=$(FAKE_ACCEPT_X_ABI=armeabi-v7a run_acceptance 2>&1)
+  status=$?
+  set -e
+  [[ $status -eq 1 ]] || fail "wrong primaryCpuAbi returned $status, expected 1"
+  grep -Fq -- 'primaryCpuAbi=armeabi-v7a (expected arm64-v8a)' <<<"$output" || \
+    fail "wrong primaryCpuAbi omitted actual and expected ABI"
+
+  reset_acceptance_logs
+  set +e
   output=$(FAKE_ACCEPT_LOGCAT='E/linker: CANNOT LINK EXECUTABLE libbroken.so' \
     run_acceptance 2>&1)
   status=$?
@@ -594,6 +634,34 @@ test_acceptance() {
   [[ $status -eq 1 ]] || fail "linker error returned $status, expected 1"
   grep -Fq -- 'CANNOT LINK EXECUTABLE' <<<"$output" || \
     fail "linker failure omitted the triggering log line"
+
+  reset_acceptance_logs
+  set +e
+  output=$(FAKE_ACCEPT_LOGCAT='E/AndroidRuntime: java.lang.UnsatisfiedLinkError: dlopen failed: wrong ELF class' \
+    run_acceptance 2>&1)
+  status=$?
+  set -e
+  [[ $status -eq 1 ]] || fail "UnsatisfiedLinkError returned $status, expected 1"
+  grep -Fq -- 'wrong ELF class' <<<"$output" || \
+    fail "UnsatisfiedLinkError failure omitted the triggering log line"
+
+  reset_acceptance_logs
+  set +e
+  output=$(FAKE_ADB_FAIL_INSTALL=abis run_acceptance 2>&1)
+  status=$?
+  set -e
+  [[ $status -eq 1 ]] || fail "INSTALL_FAILED_NO_MATCHING_ABIS returned $status, expected 1"
+  grep -Fq -- 'INSTALL_FAILED_NO_MATCHING_ABIS' <<<"$output" || \
+    fail "INSTALL_FAILED_NO_MATCHING_ABIS omitted the adb failure"
+
+  reset_acceptance_logs
+  set +e
+  output=$(FAKE_ADB_PROFILE=hang ACCEPT_ADB_TIMEOUT=0.1 run_acceptance 2>&1)
+  status=$?
+  set -e
+  [[ $status -eq 1 ]] || fail "hung production installer returned $status, expected 1"
+  grep -Fq -- 'installer timed out while installing com.twitter.android' <<<"$output" || \
+    fail "hung production installer omitted timeout context"
 
   reset_acceptance_logs
   set +e
@@ -759,7 +827,7 @@ run_lab() {
 }
 
 test_dispatch() {
-  local tmp home bin log argv_log install_log output status check_line install_line path
+  local tmp home bin log argv_log install_log installed_root output status check_line install_line path
   local x_bundle instagram_bundle boot_calls
   tmp=$(mktemp -d)
   home="$tmp/home"
@@ -767,6 +835,7 @@ test_dispatch() {
   log="$tmp/commands.log"
   argv_log="$tmp/argv.log"
   install_log="$tmp/install.log"
+  installed_root="$tmp/installed"
   trap 'rm -rf "$tmp"' RETURN
   mkdir -p "$home/Android/lineage-multilib" "$home/empty-sdk"
   : >"$home/Android/lineage-multilib/vda.raw"
@@ -885,8 +954,11 @@ test_dispatch() {
   : >"$log"
   : >"$install_log"
   : >"$boot_calls"
+  rm -rf "$installed_root"
+  mkdir -p "$installed_root"
   output=$(FAKE_ADB_PROFILE=accept FAKE_LAB_COMMAND_LOG="$log" \
     FAKE_ADB_LOG="$log" FAKE_ADB_INSTALL_LOG="$install_log" \
+    FAKE_ACCEPT_INSTALLED_ROOT="$installed_root" \
     FAKE_ACCEPT_BOOT_CALLS_FILE="$boot_calls" ACCEPT_POLL_ATTEMPTS=3 \
     ACCEPT_POLL_INTERVAL=0 run_lab "$home" "$bin" qemu accept \
     "$x_bundle" "$instagram_bundle")

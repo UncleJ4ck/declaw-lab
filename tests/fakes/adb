@@ -44,6 +44,7 @@ fi
 case "$command" in
   install|install-multiple)
     shift
+    abi=
     [[ ${1:-} == -r ]] || {
       echo "fake adb: installer omitted -r" >&2
       exit 94
@@ -54,6 +55,7 @@ case "$command" in
         echo "fake adb: --abi omitted its value" >&2
         exit 94
       }
+      abi=$2
       shift 2
     fi
     (($# > 0)) || {
@@ -75,11 +77,49 @@ case "$command" in
         exit 93
       }
     done
+    if [[ ${FAKE_ADB_FAIL_INSTALL:-0} == abis ]]; then
+      echo "Failure [INSTALL_FAILED_NO_MATCHING_ABIS]" >&2
+      exit 1
+    fi
     if [[ ${FAKE_ADB_FAIL_INSTALL:-0} == 1 ]]; then
       echo "Failure [INSTALL_FAILED_TEST]" >&2
       exit 42
     fi
+    if [[ -n ${FAKE_ACCEPT_INSTALLED_ROOT:-} ]]; then
+      package=
+      case "$abi" in
+        arm64-v8a) package=com.twitter.android ;;
+        armeabi-v7a) package=com.instagram.android ;;
+      esac
+      if [[ -n $package && ${FAKE_ACCEPT_SKIP_INSTALL_COPY:-} != "$package" ]]; then
+        mkdir -p "$FAKE_ACCEPT_INSTALLED_ROOT/$package"
+        for apk in "$@"; do
+          cp -- "$apk" "$FAKE_ACCEPT_INSTALLED_ROOT/$package/$(basename "$apk")"
+        done
+      fi
+    fi
     echo Success
+    ;;
+  pull)
+    shift
+    remote_path=${1:-}
+    local_path=${2:-}
+    [[ -n $remote_path && -n $local_path && -n ${FAKE_ACCEPT_INSTALLED_ROOT:-} ]] || {
+      echo "fake adb: invalid pull arguments" >&2
+      exit 94
+    }
+    package=
+    case "$remote_path" in
+      *com.twitter.android*) package=com.twitter.android ;;
+      *com.instagram.android*) package=com.instagram.android ;;
+    esac
+    basename=${remote_path##*/}
+    [[ -n $package && -f $FAKE_ACCEPT_INSTALLED_ROOT/$package/$basename ]] || {
+      echo "fake adb: installed file not found for pull: $remote_path" >&2
+      exit 93
+    }
+    mkdir -p -- "$(dirname "$local_path")"
+    cp -- "$FAKE_ACCEPT_INSTALLED_ROOT/$package/$basename" "$local_path"
     ;;
   get-state)
     echo device
