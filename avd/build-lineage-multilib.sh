@@ -23,6 +23,10 @@ readonly REPO_LAUNCHER_SHA256=6cba294d6218bbd4a1500598207b3979c752c7a122aef9429e
 
 readonly MIN_DISK_GIB=400
 readonly MIN_RAM_GIB=64
+# soong_build loads the whole module graph resident (no streaming); for this multilib
+# tree the analysis peaks ~24 GiB. On an undersized host that only completes if
+# RAM + real DISK swap covers it. zram is RAM-backed and does NOT count.
+readonly SOONG_MIN_MEM_GIB=28
 
 BUILD_ROOT=${BUILD_ROOT:-$HOME/Android/lineage-multilib-build}
 SOURCE_DIR=${LINEAGE_SOURCE_DIR:-$BUILD_ROOT/source}
@@ -178,8 +182,37 @@ available_ram_gib() {
   printf '%s\n' "$((available_kib / 1024 / 1024))"
 }
 
+# Real (disk-backed) swap in GiB, excluding zram devices. zram is compressed RAM, so it
+# cannot give soong_build overflow beyond physical RAM; only a file/partition on disk can.
+disk_swap_gib() {
+  if [[ ${BUILD_TEST_MODE:-0} == 1 && -n ${BUILD_TEST_DISK_SWAP_GIB:-} ]]; then
+    is_uint "$BUILD_TEST_DISK_SWAP_GIB" || die "BUILD_TEST_DISK_SWAP_GIB must be an integer"
+    printf '%s\n' "$BUILD_TEST_DISK_SWAP_GIB"
+    return
+  fi
+  local kib
+  kib=$(awk 'NR>1 && $1 !~ /zram/ { s += $3 } END { print s+0 }' /proc/swaps 2>/dev/null)
+  is_uint "$kib" || kib=0
+  printf '%s\n' "$((kib / 1024 / 1024))"
+}
+
+# Memory actually available to soong right now (MemAvailable), not total installed RAM. The
+# OOM this guards against happened with 31 GiB installed but only ~22 GiB available.
+free_mem_gib() {
+  if [[ ${BUILD_TEST_MODE:-0} == 1 && -n ${BUILD_TEST_FREE_MEM_GIB:-} ]]; then
+    is_uint "$BUILD_TEST_FREE_MEM_GIB" || die "BUILD_TEST_FREE_MEM_GIB must be an integer"
+    printf '%s\n' "$BUILD_TEST_FREE_MEM_GIB"
+    return
+  fi
+  local kib
+  kib=$(awk '/^MemAvailable:/ { print $2; exit }' /proc/meminfo)
+  is_uint "$kib" || kib=$(awk '/^MemTotal:/ { print $2; exit }' /proc/meminfo)
+  is_uint "$kib" || die "could not determine available memory"
+  printf '%s\n' "$((kib / 1024 / 1024))"
+}
+
 preflight() {
-  local tool module qemu_img disk_gib ram_gib failed=0 imagemagick_found=0
+  local tool module qemu_img disk_gib ram_gib swap_gib effective_gib failed=0 imagemagick_found=0
 
   while IFS= read -r tool; do
     if ! command -v "$tool" >/dev/null 2>&1; then
@@ -236,15 +269,31 @@ PY
     failed=1
   fi
 
+  # Hard memory floor for soong (non-bypassable): even with ALLOW_UNDERSIZED_BUILD a build
+  # that cannot fit soong_build's resident graph is a guaranteed OOM, not just a slow build.
+  swap_gib=$(disk_swap_gib)
+  local free_gib
+  free_gib=$(free_mem_gib)
+  effective_gib=$((free_gib + swap_gib))
+  if ((ram_gib < MIN_RAM_GIB && effective_gib < SOONG_MIN_MEM_GIB)); then
+    local need_gib=$((SOONG_MIN_MEM_GIB - effective_gib + 4))
+    echo "[build] ERROR: only ${effective_gib} GiB usable (free RAM ${free_gib} + disk-swap ${swap_gib} GiB);" >&2
+    echo "[build] soong_build needs ~${SOONG_MIN_MEM_GIB} GiB resident and will be OOM-killed mid-analysis." >&2
+    echo "[build] zram does not help (it is RAM-backed). Add a real disk swapfile once:" >&2
+    echo "[build]   sudo sh -c 'fallocate -l ${need_gib}G /home/swapfile-multilib && chmod 600 /home/swapfile-multilib && mkswap /home/swapfile-multilib && swapon /home/swapfile-multilib'" >&2
+    echo "[build] then re-run. This is a hard OOM, so it is not bypassable." >&2
+    exit 2
+  fi
+
   if ((failed != 0)); then
     if [[ ${ALLOW_UNDERSIZED_BUILD:-0} != 1 ]]; then
       echo "[build] Set ALLOW_UNDERSIZED_BUILD=1 to accept a slow or space-constrained build." >&2
       exit 2
     fi
-    echo "[build] WARNING: continuing with $disk_gib GiB free and $ram_gib GiB RAM" >&2
+    echo "[build] WARNING: continuing with $disk_gib GiB free and $ram_gib GiB RAM (swap ${swap_gib} GiB disk)" >&2
   fi
 
-  echo "[build] preflight disk=${disk_gib}GiB ram=${ram_gib}GiB"
+  echo "[build] preflight disk=${disk_gib}GiB ram=${ram_gib}GiB disk-swap=${swap_gib}GiB effective=${effective_gib}GiB"
 }
 
 install_repo_launcher() {

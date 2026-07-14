@@ -1101,10 +1101,13 @@ SH
 run_build_preflight() {
   local bin=$1 disk_gib=$2 ram_gib=$3
   shift 3
+  # SWAP_GIB/FREE_GIB default generous so unrelated cases are deterministic and never trip
+  # the soong memory floor; floor cases set them low explicitly.
   PATH="$bin:/usr/bin:/bin" BUILD_TEST_MODE=1 \
     BUILD_TEST_REQUIRED_TOOLS=bash BUILD_TEST_DISK_GIB="$disk_gib" \
     BUILD_TEST_RAM_GIB="$ram_gib" BUILD_TEST_QEMU_IMG_PATH=/usr/bin/true \
     BUILD_TEST_IMAGEMAGICK_TOOLS=true BUILD_TEST_SKIP_PYTHON_MODULES=1 \
+    BUILD_TEST_DISK_SWAP_GIB="${SWAP_GIB:-64}" BUILD_TEST_FREE_MEM_GIB="${FREE_GIB:-64}" \
     BUILD_PREFLIGHT_ONLY=1 \
     "$ROOT/avd/build-lineage-multilib.sh" "$@"
 }
@@ -1466,6 +1469,26 @@ SH
   grep -Fq -- "[build] preflight-only: PASS" <<<"$output" || \
     fail "preflight-only success was not explicit"
   [[ ! -s $log ]] || fail "preflight-only mode reached git/curl/repo"
+
+  # soong memory floor: undersized RAM with no real disk swap is a hard, non-bypassable stop
+  : >"$log"
+  set +e
+  output=$(FAKE_BUILD_NETWORK_LOG="$log" ALLOW_UNDERSIZED_BUILD=1 SWAP_GIB=0 FREE_GIB=22 \
+    run_build_preflight "$bin" 500 31 2>&1)
+  status=$?
+  set -e
+  [[ $status -eq 2 ]] || fail "soong memory floor did not block (status $status)"
+  grep -Fq -- "fallocate -l" <<<"$output" || fail "memory floor omitted the swapfile command"
+  grep -Fq -- "not bypassable" <<<"$output" || fail "memory floor was not marked non-bypassable"
+  [[ ! -s $log ]] || fail "memory floor reached git/curl/repo"
+
+  # enough real disk swap clears the floor
+  : >"$log"
+  output=$(FAKE_BUILD_NETWORK_LOG="$log" ALLOW_UNDERSIZED_BUILD=1 SWAP_GIB=48 FREE_GIB=22 \
+    run_build_preflight "$bin" 500 31 2>&1)
+  grep -Fq -- "[build] preflight-only: PASS" <<<"$output" || \
+    fail "48 GiB disk swap did not clear the soong memory floor"
+  [[ ! -s $log ]] || fail "swap-cleared preflight reached git/curl/repo"
 
   echo "PASS: build"
 }
