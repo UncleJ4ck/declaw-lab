@@ -17,7 +17,8 @@
 #   keylog PKG  QUIC/HTTP3 (cronet) is invisible to a MITM: run declaw's friTap key+pcap
 #               capture on this device (SSLKEYLOG + pcap, decrypt in Wireshark).
 #   probe P L O confirm L@O is the LIVE ssl_verify_peer_cert in pkg P (BRK; qemu/arm64 only).
-#   provision   one-time: fetch + prepare a rooted image
+#   fetch [TAG] download + verify a published multilib image (no build), then provision it
+#   provision   one-time: prepare a rooted image from a fetched or locally-built artifact
 #   up root shell ui   the individual steps, all folded into the default
 #   status | down      show state | stop (also stops the MITM)
 #
@@ -36,14 +37,14 @@ if [ ! -x "${JAVA_HOME:-/nonexistent}/bin/java" ]; then
   done
 fi
 
-usage() { sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 case "${1:-}" in -h|--help|help) usage 0 ;; esac
 # Backend is an optional first arg. Then a known subcommand runs as-is; anything else
 # (a bare apk/dir/package, or nothing) means the default `go`, which captures that target.
 BACKEND=qemu
 case "${1:-}" in qemu|avd) BACKEND="$1"; shift ;; esac
 case "${1:-}" in
-  go|provision|up|root|shell|ui|capture|keylog|probe|check|install|accept|status|down) CMD="$1"; shift ;;
+  go|provision|fetch|up|root|shell|ui|capture|keylog|probe|check|install|accept|status|down) CMD="$1"; shift ;;
   *) CMD=go ;;   # empty or a bare apk/pkg -> go [target]
 esac
 
@@ -427,6 +428,7 @@ case "$BACKEND:$CMD" in
   qemu:install)   qemu_install "$@" ;;
   qemu:accept)    qemu_accept "$@" ;;
   qemu:probe)     do_probe "$QDEV" "$@" ;;
+  qemu:fetch)     "$HERE/fetch-multilib.sh" "$@" ;;
   qemu:provision) "$HERE/provision.sh" ;;
   qemu:up)        qemu_up ;;
   qemu:root)      "$HERE/adb-root.sh" ;;
@@ -439,6 +441,7 @@ case "$BACKEND:$CMD" in
   avd:keylog)     avd_ensure; do_keylog "$(avd_serial)" "${1:-}" ;;
   avd:accept)     echo "[accept] qemu-only: the AVD guest is x86_64 and cannot prove native ARM app processes"; exit 2 ;;
   avd:probe)      echo "[probe] arm64-only (arm64 BRK bytes + arm64 mempoke); use: lab qemu probe <pkg> <lib> <off>"; exit 2 ;;
+  avd:fetch)      echo "[fetch] multilib images are qemu/arm64 only; the avd backend uses SDK x86_64 images"; exit 2 ;;
   avd:provision)  avd_provision ;;
   avd:up)         avd_up ;;
   avd:root)       avd_root ;;
