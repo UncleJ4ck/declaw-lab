@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# declaw-env lab: one command to a rooted Android that decrypts an app's HTTPS into Burp.
+# declaw-lab: one command to a rooted Android that decrypts an app's HTTPS into Burp.
 #
 # Backend is the optional first arg (default qemu):
 #   qemu  REAL aarch64 Android 16 (qemu TCG, rooted). The ONLY backend that runs
