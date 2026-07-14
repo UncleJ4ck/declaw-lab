@@ -422,7 +422,7 @@ do_keylog() {  # $1 serial  $2 pkg
 
 case "$BACKEND:$CMD" in
   qemu:go)        qemu_go "${1:-}" ;;
-  qemu:capture)   qemu_ensure; do_capture "$QDEV" "${1:-}" ;;
+  qemu:capture)   qemu_ensure; ui "$QDEV" qemu; do_capture "$QDEV" "${1:-}" ;;
   qemu:keylog)    qemu_ensure; do_keylog "$QDEV" "${1:-}" ;;
   qemu:check)     qemu_check ;;
   qemu:install)   qemu_install "$@" ;;
@@ -437,7 +437,7 @@ case "$BACKEND:$CMD" in
   qemu:status)    qemu_status ;;
   qemu:down)      qemu_down ;;
   avd:go)         avd_go "${1:-}" ;;
-  avd:capture)    avd_ensure; do_capture "$(avd_serial)" "${1:-}" ;;
+  avd:capture)    avd_ensure; s="$(avd_serial)"; ui "$s" avd; do_capture "$s" "${1:-}" ;;
   avd:keylog)     avd_ensure; do_keylog "$(avd_serial)" "${1:-}" ;;
   avd:accept)     echo "[accept] qemu-only: the AVD guest is x86_64 and cannot prove native ARM app processes"; exit 2 ;;
   avd:probe)      echo "[probe] arm64-only (arm64 BRK bytes + arm64 mempoke); use: lab qemu probe <pkg> <lib> <off>"; exit 2 ;;

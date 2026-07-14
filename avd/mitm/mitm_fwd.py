@@ -82,6 +82,8 @@ def main():
 
     def sni_cb(sslobj, server_name, _ctx):
         sslobj.context = ctx_for(server_name)      # swap in a cert whose SAN matches the SNI
+        sslobj._sni = server_name                  # stash it: server-side sockets expose SNI
+                                                   # nowhere else (server_hostname stays None)
 
     sctx = ctx_for("default")
     sctx.sni_callback = sni_cb
@@ -132,7 +134,8 @@ def main():
         try:
             cs = sctx.wrap_socket(c, server_side=True)   # patched app accepts our cert here
             cs.settimeout(8)
-            sni = getattr(cs, "server_hostname", None)   # SNI, for cert match + host fallback
+            sni = getattr(cs, "_sni", None)              # set by sni_cb; host fallback when
+                                                         # the request carries no Host header
             req = b""
             while b"\r\n\r\n" not in req and len(req) < 65536:
                 d = cs.recv(4096)
