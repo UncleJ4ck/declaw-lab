@@ -65,14 +65,14 @@ that a smaller host is reliable. The running rig uses far less space and RAM.
 
 ### Speed levers (all verified accepted by qemu 11.0.2, MTTCG confirmed active)
 
-- `-accel tcg,thread=multi` — MTTCG. Confirmed spreading 6 guest vCPUs across 6
+- `-accel tcg,thread=multi`: MTTCG. Confirmed spreading 6 guest vCPUs across 6
   host P-core threads (affinity `0,2,4,6,8,10`). Safe here: the x86 host is
   strongly ordered vs the weakly ordered arm guest (the slow case is the reverse).
-- `-cpu max,pauth-impdef=on` — cheap pointer-auth instead of QEMU's slow crypto
+- `-cpu max,pauth-impdef=on`: cheap pointer-auth instead of QEMU's slow crypto
   default. Pointer-auth emulation is a big chunk of "aarch64 is 2x slower than an
   x86 guest".
-- `-accel ...,tb-size=1024` — 1 GB translation-block cache, less re-translation.
-- `taskset -c 0,2,4,6,8,10` — one host P-core thread per vCPU, E-cores left free.
+- `-accel ...,tb-size=1024`: 1 GB translation-block cache, less re-translation.
+- `taskset -c 0,2,4,6,8,10`: one host P-core thread per vCPU, E-cores left free.
 - THP `[always]` backs guest RAM with 2 MB hugepages for free.
 
 ### The real "fast" for iteration: snapshot the warm VM

@@ -21,3 +21,4 @@ dist/
 
 # AI tooling artifacts
 .serena/
+.claude/
