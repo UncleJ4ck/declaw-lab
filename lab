@@ -207,7 +207,10 @@ avd_serial() { adb devices | awk '/^emulator-/{print $1; exit}'; }
 avd_up() {
   avd_running && { echo "[avd] already up"; return; }
   emulator -list-avds 2>/dev/null | grep -qx "$AVD_NAME" || { echo "[avd] run 'lab avd provision' first"; exit 1; }
-  nohup emulator -avd "$AVD_NAME" -no-window -no-audio -no-boot-anim -no-snapshot \
+  # -no-snapshot-save (not -no-snapshot): LOAD the default_boot snapshot if avd_ensure
+  # saved one (rooted state restores in ~8s vs a ~26s cold boot, measured on this rig),
+  # but never overwrite it, so every run starts from the same clean rooted state.
+  nohup emulator -avd "$AVD_NAME" -no-window -no-audio -no-boot-anim -no-snapshot-save \
     -writable-system -gpu swiftshader_indirect -no-metrics >/tmp/declaw-avd.log 2>&1 &
   echo "[avd] booting (KVM). tail /tmp/declaw-avd.log"
 }
@@ -233,6 +236,13 @@ avd_ensure() {  # boot (if needed) + wait + root; returns with the device up and
     pgrep -f 'qemu-system-x86_64' >/dev/null || { echo "[avd] boot failed, see /tmp/declaw-avd.log"; exit 1; }
   done
   avd_root >/dev/null 2>&1 || echo "[avd] warning: root not confirmed"
+  # One-time: capture a rooted snapshot so future boots restore fast (see avd_up). Skip
+  # if it already exists; -no-snapshot-save never overwrites it. DECLAW_NO_QUICKBOOT=1
+  # opts out (always cold boot).
+  if [ "${DECLAW_NO_QUICKBOOT:-0}" = 0 ] && ! adb -s "$S" emu avd snapshot list 2>/dev/null | grep -q '\bdefault_boot\b'; then
+    echo "[avd] saving one-time default_boot snapshot for fast reboots..."
+    adb -s "$S" emu avd snapshot save default_boot >/dev/null 2>&1 || echo "[avd] snapshot save failed (boots stay cold)"
+  fi
 }
 avd_go() {  # $1 optional capture target (apk / split dir / package)
   avd_ensure
