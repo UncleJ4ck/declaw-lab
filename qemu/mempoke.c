@@ -54,10 +54,13 @@ int main(int argc, char **argv) {
         int fd = open(path, O_RDWR);
         if (fd < 0) { perror("open mem"); return 4; }
         unsigned char before[64] = {0}, after[64] = {0};
-        pread(fd, before, n, (off_t)addr);
+        // The caller (lab do_probe) writes `before` back to restore .text on a probe
+        // miss, so a short read here would restore zeros over a live instruction. Bail
+        // before pwrite if the original can't be read, and re-check the read-back.
+        if (pread(fd, before, n, (off_t)addr) != n) { perror("pread before"); close(fd); return 5; }
         ssize_t w = pwrite(fd, buf, n, (off_t)addr);
         if (w != n) { perror("pwrite"); close(fd); return 5; }
-        pread(fd, after, n, (off_t)addr);
+        if (pread(fd, after, n, (off_t)addr) != n) { perror("pread after"); close(fd); return 5; }
         close(fd);
         printf("POKE addr=0x%" PRIx64 " (base=0x%" PRIx64 ") before=", addr, base);
         for (int i = 0; i < n; i++) printf("%02x", before[i]);

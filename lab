@@ -227,8 +227,10 @@ avd_ensure() {  # boot (if needed) + wait + root; returns with the device up and
   avd_up; local S; echo "[avd] waiting for boot..."
   for _ in $(seq 1 50); do
     S="$(avd_serial)"; [ -n "$S" ] && [ "$(timeout 6 adb -s "$S" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = 1 ] && break
-    pgrep -f 'qemu-system-x86_64' >/dev/null || { echo "[avd] boot failed, see /tmp/declaw-avd.log"; exit 1; }
+    # sleep before the liveness check: the `emulator` launcher execs qemu-system-x86_64
+    # a beat later, so checking on the first iteration would false-abort a healthy boot.
     sleep 6
+    pgrep -f 'qemu-system-x86_64' >/dev/null || { echo "[avd] boot failed, see /tmp/declaw-avd.log"; exit 1; }
   done
   avd_root >/dev/null 2>&1 || echo "[avd] warning: root not confirmed"
 }
@@ -256,6 +258,9 @@ resolve_scrcpy() {
   [ "$(uname -m)" = x86_64 ] || { echo "[ui] install scrcpy (bundled prebuilt is x86_64 only)" >&2; return 1; }
   mkdir -p "$HERE/bin"; curl -fsSL "$SCRCPY_URL" -o "$HERE/bin/scrcpy.tgz" \
     && tar xzf "$HERE/bin/scrcpy.tgz" -C "$HERE/bin" && rm -f "$HERE/bin/scrcpy.tgz"
+  # Only claim success if the binary actually landed; else the caller's `|| exit 1`
+  # is dead (echo's status is 0) and nohup launches a missing path with no window.
+  [ -x "$SCRCPY_DIR/scrcpy" ] || { echo "[ui] scrcpy download/extract failed; see the curl/tar output above" >&2; return 1; }
   echo "$SCRCPY_DIR/scrcpy"
 }
 ui() {  # $1 serial  $2 label
@@ -282,7 +287,14 @@ mitm_start() {
   mkdir -p "$(dirname "$TRAFFIC_LOG_FILE")"
   MITM_BIND=0.0.0.0 MITM_PORT="$MITMP" TRAFFIC_LOG="$TRAFFIC_LOG_FILE" BURP="$BURP" \
     nohup python3 "$HERE/shared/mitm/mitm_fwd.py" >/tmp/declaw-mitm.log 2>&1 &
-  sleep 1
+  # Poll until it actually accepts, not a fixed sleep: the startup mints a cert via
+  # openssl before listen(), and the DNAT installed right after points 443 here, so a
+  # slow start would refuse the app's first connections.
+  for _ in $(seq 1 50); do
+    (exec 3<>"/dev/tcp/127.0.0.1/$MITMP") 2>/dev/null && { exec 3>&-; return; }
+    sleep 0.2
+  done
+  echo "[mitm] warning: listener not up after 10s, see /tmp/declaw-mitm.log" >&2
 }
 # Tell the pentester exactly where their decrypted traffic goes. The whole point of
 # declaw is that the app trusts ANY cert, so Burp needs only its default proxy listener

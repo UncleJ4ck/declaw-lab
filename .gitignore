@@ -18,3 +18,6 @@ __pycache__/
 # local LineageOS source/build outputs
 .lineage-multilib-build/
 dist/
+
+# AI tooling artifacts
+.serena/

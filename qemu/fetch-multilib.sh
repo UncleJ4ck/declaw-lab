@@ -53,6 +53,17 @@ tag="$(printf '%s\n' "$assets" | sed -n '1p')"
 dest="$BUILD_ROOT/dist/${tag}-virtio_arm64"
 mkdir -p -- "$dest"
 
+# Cached fast path: a previously verified image is byte-identical, so skip the
+# multi-GB re-download. Any miss (no zip, no SHA256SUMS, checksum fail) falls through
+# to the normal fetch + verify below, which overwrites a corrupt copy.
+cached="$(cd "$dest" && ls UTM-VM-*-virtio_arm64.zip 2>/dev/null | head -1 || true)"
+if [ -n "$cached" ] && [ -f "$dest/SHA256SUMS" ] && \
+   ( cd "$dest" && awk -v f="$cached" '($2 == f) || ($2 == "*" f) { print }' SHA256SUMS | sha256sum -c - >/dev/null 2>&1 ); then
+  echo "[fetch] cached $dest/$cached already verified; skipping download"
+  echo "[fetch] next: lab qemu provision"
+  exit 0
+fi
+
 printf '%s\n' "$assets" | tail -n +2 | while IFS=$'\t' read -r name url; do
   [ -n "$name" ] || continue
   echo "[fetch] $name"
