@@ -193,7 +193,7 @@ run_checker_profile() {
   set +e
   output=$(PATH="$FAKES:$PATH" FAKE_ADB_PROFILE="$profile" \
     CHECK_ADB_TIMEOUT="$adb_timeout" timeout 2 \
-    "$ROOT/avd/check-multilib.sh" test-serial 2>&1)
+    "$ROOT/qemu/check-multilib.sh" test-serial 2>&1)
   status=$?
   set -e
   [[ $status -eq $expected_status ]] || {
@@ -209,7 +209,7 @@ test_checker() {
   trap 'rm -f "$log"' RETURN
 
   output=$(PATH="$FAKES:$PATH" FAKE_ADB_PROFILE=multilib FAKE_ADB_LOG="$log" \
-    "$ROOT/avd/check-multilib.sh" test-serial)
+    "$ROOT/qemu/check-multilib.sh" test-serial)
   assert_line "$output" "[check] release=16 sdk=36 kernel=aarch64 uid=0 selinux=Permissive"
   assert_line "$output" "[check] zygote=zygote64_32"
   assert_line "$output" "[check] abilist64=arm64-v8a"
@@ -272,7 +272,7 @@ test_installer() {
   make_apk "$tmp/demo.apk"
   PATH="$FAKES:$PATH" FAKE_ADB_PROFILE=installer \
     FAKE_ADB_INSTALL_LOG="$install_log" FAKE_ADB_ARGV_LOG="$argv_log" \
-    "$ROOT/avd/install-app.sh" test-serial "$tmp/demo.apk" >/dev/null
+    "$ROOT/shared/install-app.sh" test-serial "$tmp/demo.apk" >/dev/null
   assert_line "$(<"$install_log")" $'install\tdemo.apk'
   grep -Fq -- "$(printf '%q' "$tmp/demo.apk")" "$argv_log" || \
     fail "single APK path was not preserved as one adb argument"
@@ -281,7 +281,7 @@ test_installer() {
   : >"$argv_log"
   PATH="$FAKES:$PATH" FAKE_ADB_PROFILE=installer \
     FAKE_ADB_INSTALL_LOG="$install_log" FAKE_ADB_ARGV_LOG="$argv_log" \
-    "$ROOT/avd/install-app.sh" test-serial --abi arm64-v8a \
+    "$ROOT/shared/install-app.sh" test-serial --abi arm64-v8a \
     "$tmp/demo.apk" >/dev/null
   grep -Fq -- "install -r --abi arm64-v8a" "$argv_log" || \
     fail "single APK install did not forward --abi arm64-v8a to adb"
@@ -295,7 +295,7 @@ test_installer() {
   printf 'not an apk\n' >"$tmp/X bundle/read me.txt"
   PATH="$FAKES:$PATH" FAKE_ADB_PROFILE=installer \
     FAKE_ADB_INSTALL_LOG="$install_log" \
-    "$ROOT/avd/install-app.sh" test-serial "$tmp/X bundle" >/dev/null
+    "$ROOT/shared/install-app.sh" test-serial "$tmp/X bundle" >/dev/null
   assert_line "$(<"$install_log")" \
     $'install-multiple\tbase.apk\tfeature with spaces.apk\tsplit_config.arm64_v8a.apk'
 
@@ -308,7 +308,7 @@ test_installer() {
   make_bundle "$tmp/instagram.apkm" "$tmp/instagram-source"
   PATH="$FAKES:$PATH" FAKE_ADB_PROFILE=installer \
     FAKE_ADB_INSTALL_LOG="$install_log" \
-    "$ROOT/avd/install-app.sh" test-serial "$tmp/instagram.apkm" >/dev/null
+    "$ROOT/shared/install-app.sh" test-serial "$tmp/instagram.apkm" >/dev/null
   assert_line "$(<"$install_log")" \
     $'install-multiple\tbase.apk\tsplit_config.xhdpi.apk'
 
@@ -322,7 +322,7 @@ test_installer() {
   make_bundle "$tmp/whatsapp.xapk" "$tmp/whatsapp-source"
   PATH="$FAKES:$PATH" FAKE_ADB_PROFILE=installer \
     FAKE_ADB_INSTALL_LOG="$install_log" \
-    "$ROOT/avd/install-app.sh" test-serial "$tmp/whatsapp.xapk" >/dev/null
+    "$ROOT/shared/install-app.sh" test-serial "$tmp/whatsapp.xapk" >/dev/null
   assert_line "$(<"$install_log")" \
     $'install-multiple\tcom.whatsapp.apk\tconfig.armeabi_v7a.apk'
 
@@ -350,7 +350,7 @@ test_installer() {
 
   set +e
   output=$(PATH="$FAKES:$PATH" FAKE_ADB_PROFILE=installer \
-    "$ROOT/avd/install-app.sh" test-serial "$tmp/mixed.apkm" 2>&1)
+    "$ROOT/shared/install-app.sh" test-serial "$tmp/mixed.apkm" 2>&1)
   status=$?
   set -e
   [[ $status -ne 0 ]] || fail "mixed ARM bundle installed without --abi"
@@ -359,7 +359,7 @@ test_installer() {
   : >"$argv_log"
   PATH="$FAKES:$PATH" FAKE_ADB_PROFILE=installer \
     FAKE_ADB_INSTALL_LOG="$install_log" FAKE_ADB_ARGV_LOG="$argv_log" \
-    "$ROOT/avd/install-app.sh" test-serial --abi armeabi-v7a \
+    "$ROOT/shared/install-app.sh" test-serial --abi armeabi-v7a \
     "$tmp/mixed.apkm" >/dev/null
   assert_line "$(<"$install_log")" \
     $'install-multiple\tbase.apk\tneutral-arm32.apk\tsplit_config.armeabi_v7a.apk\tsplit_config.en.apk\tuniversal-native.apk'
@@ -376,7 +376,7 @@ test_installer() {
   : >"$argv_log"
   PATH="$FAKES:$PATH" FAKE_ADB_PROFILE=installer \
     FAKE_ADB_INSTALL_LOG="$install_log" FAKE_ADB_ARGV_LOG="$argv_log" \
-    "$ROOT/avd/install-app.sh" test-serial --abi x86_64 \
+    "$ROOT/shared/install-app.sh" test-serial --abi x86_64 \
     "$tmp/mixed.apkm" >/dev/null
   assert_line "$(<"$install_log")" \
     $'install-multiple\tbase.apk\tforeign-multi.apk\tsplit_config.en.apk\tsplit_config.x86_64.apk'
@@ -390,7 +390,7 @@ test_installer() {
   : >"$argv_log"
   PATH="$FAKES:$PATH" FAKE_ADB_PROFILE=installer \
     FAKE_ADB_INSTALL_LOG="$install_log" FAKE_ADB_ARGV_LOG="$argv_log" \
-    "$ROOT/avd/install-app.sh" test-serial --abi x86 \
+    "$ROOT/shared/install-app.sh" test-serial --abi x86 \
     "$tmp/mixed.apkm" >/dev/null
   assert_line "$(<"$install_log")" \
     $'install-multiple\tbase.apk\tsplit_config.en.apk\tsplit_config.x86.apk'
@@ -405,7 +405,7 @@ test_installer() {
   make_bundle "$tmp/incompatible-base.apkm" "$tmp/incompatible-base-source"
   set +e
   output=$(PATH="$FAKES:$PATH" FAKE_ADB_PROFILE=installer \
-    "$ROOT/avd/install-app.sh" test-serial --abi armeabi-v7a \
+    "$ROOT/shared/install-app.sh" test-serial --abi armeabi-v7a \
     "$tmp/incompatible-base.apkm" 2>&1)
   status=$?
   set -e
@@ -417,7 +417,7 @@ test_installer() {
 
   set +e
   output=$(PATH="$FAKES:$PATH" FAKE_ADB_PROFILE=installer \
-    "$ROOT/avd/install-app.sh" test-serial --abi armeabi-v7a \
+    "$ROOT/shared/install-app.sh" test-serial --abi armeabi-v7a \
     "$tmp/X bundle" 2>&1)
   status=$?
   set -e
@@ -432,16 +432,16 @@ test_installer() {
   mkdir "$tmp/empty-source"
   printf 'metadata\n' >"$tmp/empty-source/info.json"
   make_bundle "$tmp/empty.apkm" "$tmp/empty-source"
-  assert_status 2 "$ROOT/avd/install-app.sh"
-  assert_status 2 "$ROOT/avd/install-app.sh" test-serial "$tmp/empty-dir"
-  assert_status 2 "$ROOT/avd/install-app.sh" test-serial "$tmp/malformed.apkm"
-  assert_status 2 "$ROOT/avd/install-app.sh" test-serial "$tmp/empty.apkm"
-  assert_status 2 "$ROOT/avd/install-app.sh" test-serial --abi riscv64 "$tmp/demo.apk"
-  assert_status 2 "$ROOT/avd/install-app.sh" test-serial "$tmp/does-not-exist.apkm"
+  assert_status 2 "$ROOT/shared/install-app.sh"
+  assert_status 2 "$ROOT/shared/install-app.sh" test-serial "$tmp/empty-dir"
+  assert_status 2 "$ROOT/shared/install-app.sh" test-serial "$tmp/malformed.apkm"
+  assert_status 2 "$ROOT/shared/install-app.sh" test-serial "$tmp/empty.apkm"
+  assert_status 2 "$ROOT/shared/install-app.sh" test-serial --abi riscv64 "$tmp/demo.apk"
+  assert_status 2 "$ROOT/shared/install-app.sh" test-serial "$tmp/does-not-exist.apkm"
 
   set +e
   PATH="$FAKES:$PATH" FAKE_ADB_PROFILE=installer FAKE_ADB_FAIL_INSTALL=1 \
-    "$ROOT/avd/install-app.sh" test-serial "$tmp/demo.apk" >/dev/null 2>&1
+    "$ROOT/shared/install-app.sh" test-serial "$tmp/demo.apk" >/dev/null 2>&1
   status=$?
   set -e
   [[ $status -eq 42 ]] || fail "adb install failure returned $status, expected 42"
@@ -691,13 +691,13 @@ test_acceptance() {
     fail "missing PID omitted a useful process error"
 
   grep -Fq -- \
-    'BUILD_ROOT=$PWD/.lineage-multilib-build ./avd/build-lineage-multilib.sh' \
+    'BUILD_ROOT=$PWD/.lineage-multilib-build ./qemu/build-lineage-multilib.sh' \
     "$ROOT/README.md" || fail "README omitted the clone-local multilib build command"
-  grep -Fq -- './avd/lab qemu check' "$ROOT/README.md" || \
+  grep -Fq -- './lab qemu check' "$ROOT/README.md" || \
     fail "README omitted the live multilib gate"
-  grep -Fq -- './avd/lab qemu install --abi armeabi-v7a' "$ROOT/README.md" || \
+  grep -Fq -- './lab qemu install --abi armeabi-v7a' "$ROOT/README.md" || \
     fail "README omitted explicit ARM32 installation"
-  grep -Fq -- './avd/lab qemu accept <X.apkm> <Instagram.apkm>' "$ROOT/README.md" || \
+  grep -Fq -- './lab qemu accept <X.apkm> <Instagram.apkm>' "$ROOT/README.md" || \
     fail "README omitted the one-boot acceptance command"
   grep -Fq -- 'build-metadata.txt' "$ROOT/README.md" || \
     fail "README omitted builder provenance metadata"
@@ -823,7 +823,7 @@ run_lab() {
   HOME="$home" ANDROID_SDK_ROOT="$home/empty-sdk" \
     PATH="$bin:$FAKES:$PATH" REAL_FAKE_ADB="$FAKES/adb" \
     FAKE_ADB_PROFILE="${FAKE_ADB_PROFILE:-multilib}" \
-    "$ROOT/avd/lab" "$@"
+    "$ROOT/lab" "$@"
 }
 
 test_dispatch() {
@@ -1109,7 +1109,7 @@ run_build_preflight() {
     BUILD_TEST_IMAGEMAGICK_TOOLS=true BUILD_TEST_SKIP_PYTHON_MODULES=1 \
     BUILD_TEST_DISK_SWAP_GIB="${SWAP_GIB:-64}" BUILD_TEST_FREE_MEM_GIB="${FREE_GIB:-64}" \
     BUILD_PREFLIGHT_ONLY=1 \
-    "$ROOT/avd/build-lineage-multilib.sh" "$@"
+    "$ROOT/qemu/build-lineage-multilib.sh" "$@"
 }
 
 test_build() {
@@ -1132,7 +1132,7 @@ test_build() {
     BUILD_TEST_MODE=1 BUILD_TEST_NPROC=16 \
     BUILD_DRY_RUN=1 BUILD_ROOT="$root" BUILD_DIST_DIR="$dist" \
     BUILD_TIMESTAMP=20260713T120000Z \
-    "$ROOT/avd/build-lineage-multilib.sh" 2>&1)
+    "$ROOT/qemu/build-lineage-multilib.sh" 2>&1)
   status=$?
   set -e
   [[ $status -eq 0 ]] || {
@@ -1178,7 +1178,7 @@ test_build() {
   output=$(PATH="$bin:/usr/bin:/bin" FAKE_BUILD_NETWORK_LOG="$log" \
     BUILD_DRY_RUN=1 BUILD_ROOT="$root" BUILD_DIST_DIR="$dist" \
     BUILD_JOBS=2 BUILD_TMP_DIR="$override_tmp" \
-    "$ROOT/avd/build-lineage-multilib.sh")
+    "$ROOT/qemu/build-lineage-multilib.sh")
   assert_line "$output" "[build] jobs=2 tmp=$override_tmp"
   assert_line "$output" "export TMPDIR=$override_tmp"
   assert_line "$output" "m -j2 vm-utm-zip otapackage"
@@ -1188,7 +1188,7 @@ test_build() {
     set +e
     output=$(PATH="$bin:/usr/bin:/bin" FAKE_BUILD_NETWORK_LOG="$log" \
       BUILD_DRY_RUN=1 BUILD_ROOT="$root" BUILD_JOBS="$invalid_job" \
-      "$ROOT/avd/build-lineage-multilib.sh" 2>&1)
+      "$ROOT/qemu/build-lineage-multilib.sh" 2>&1)
     status=$?
     set -e
     [[ $status -eq 2 ]] || \
@@ -1201,7 +1201,7 @@ test_build() {
     set +e
     output=$(PATH="$bin:/usr/bin:/bin" FAKE_BUILD_NETWORK_LOG="$log" \
       BUILD_DRY_RUN=1 BUILD_ROOT="$root" BUILD_TMP_DIR="$invalid_tmp" \
-      "$ROOT/avd/build-lineage-multilib.sh" 2>&1)
+      "$ROOT/qemu/build-lineage-multilib.sh" 2>&1)
     status=$?
     set -e
     [[ $status -eq 2 ]] || \
@@ -1212,16 +1212,16 @@ test_build() {
   [[ ! -s $log ]] || fail "resource-setting validation reached git/curl/repo"
 
   tools=$(bash -c 'source "$1"; required_tools' \
-    build-tools-test "$ROOT/avd/build-lineage-multilib.sh")
+    build-tools-test "$ROOT/qemu/build-lineage-multilib.sh")
   for tool in ccache lz4 lzop protoc meson glslangValidator schedtool mksquashfs; do
     assert_line "$tools" "$tool"
   done
   output=$(bash -c 'source "$1"; printf "%s" "$QEMU_IMG_PATH"' \
-    build-tools-test "$ROOT/avd/build-lineage-multilib.sh")
+    build-tools-test "$ROOT/qemu/build-lineage-multilib.sh")
   [[ $output == /usr/bin/qemu-img ]] || \
     fail "builder did not require the UTM makefile's exact /usr/bin/qemu-img"
   modules=$(bash -c 'source "$1"; required_python_modules' \
-    build-tools-test "$ROOT/avd/build-lineage-multilib.sh")
+    build-tools-test "$ROOT/qemu/build-lineage-multilib.sh")
   assert_line "$modules" yaml
   assert_line "$modules" google.protobuf
   assert_line "$modules" mako
@@ -1241,7 +1241,7 @@ SH
     BUILD_TEST_QEMU_IMG_PATH="$tmp/missing-qemu-img" \
     BUILD_TEST_IMAGEMAGICK_TOOLS='missing-magick missing-convert' \
     BUILD_TEST_DISK_GIB=999 BUILD_TEST_RAM_GIB=999 BUILD_PREFLIGHT_ONLY=1 \
-    BUILD_ROOT="$root" "$ROOT/avd/build-lineage-multilib.sh" 2>&1)
+    BUILD_ROOT="$root" "$ROOT/qemu/build-lineage-multilib.sh" 2>&1)
   status=$?
   set -e
   [[ $status -eq 2 ]] || fail "aggregated dependency preflight returned $status, expected 2"
@@ -1264,7 +1264,7 @@ SH
   home_hash=$(sha256sum "$git_home/.gitconfig" | awk '{ print $1 }')
   HOME="$git_home" BUILD_ROOT="$git_root" bash -c \
     'source "$1"; mkdir -p "$BUILD_ROOT"; configure_git_identity' \
-    build-git-test "$ROOT/avd/build-lineage-multilib.sh"
+    build-git-test "$ROOT/qemu/build-lineage-multilib.sh"
   [[ $(sha256sum "$git_home/.gitconfig" | awk '{ print $1 }') == "$home_hash" ]] || \
     fail "builder mutated the operator's normal ~/.gitconfig"
   [[ ! -e $git_home/.config/git/config ]] || \
@@ -1281,7 +1281,7 @@ SH
   mkdir -p "$utm_dir"
   set +e
   output=$(bash -c 'source "$1"; find_utm_artifact "$2"' \
-    build-artifact-test "$ROOT/avd/build-lineage-multilib.sh" "$product" 2>&1)
+    build-artifact-test "$ROOT/qemu/build-lineage-multilib.sh" "$product" 2>&1)
   status=$?
   set -e
   [[ $status -eq 2 ]] || fail "missing nested UTM artifact returned $status, expected 2"
@@ -1292,7 +1292,7 @@ SH
   : >"$product/UTM-VM-lineage-test-virtio_arm64.zip"
   set +e
   output=$(bash -c 'source "$1"; find_utm_artifact "$2"' \
-    build-artifact-test "$ROOT/avd/build-lineage-multilib.sh" "$product" 2>&1)
+    build-artifact-test "$ROOT/qemu/build-lineage-multilib.sh" "$product" 2>&1)
   status=$?
   set -e
   [[ $status -eq 2 ]] || fail "wrong-product UTM artifact returned $status, expected 2"
@@ -1302,12 +1302,12 @@ SH
   valid_utm="$utm_dir/UTM-VM-lineage-test-virtio_arm64.zip"
   : >"$valid_utm"
   output=$(bash -c 'source "$1"; find_utm_artifact "$2"' \
-    build-artifact-test "$ROOT/avd/build-lineage-multilib.sh" "$product")
+    build-artifact-test "$ROOT/qemu/build-lineage-multilib.sh" "$product")
   [[ $output == "$valid_utm" ]] || fail "UTM discovery did not return the sole exact artifact"
   : >"$utm_dir/UTM-VM-lineage-other-virtio_arm64.zip"
   set +e
   output=$(bash -c 'source "$1"; find_utm_artifact "$2"' \
-    build-artifact-test "$ROOT/avd/build-lineage-multilib.sh" "$product" 2>&1)
+    build-artifact-test "$ROOT/qemu/build-lineage-multilib.sh" "$product" 2>&1)
   status=$?
   set -e
   [[ $status -eq 2 ]] || fail "ambiguous nested UTM artifacts returned $status, expected 2"
@@ -1317,7 +1317,7 @@ SH
   : >"$product/lineage-23.2-test-virtio_arm64.zip"
   set +e
   output=$(bash -c 'source "$1"; find_ota_artifact "$2"' \
-    build-artifact-test "$ROOT/avd/build-lineage-multilib.sh" "$product" 2>&1)
+    build-artifact-test "$ROOT/qemu/build-lineage-multilib.sh" "$product" 2>&1)
   status=$?
   set -e
   [[ $status -eq 2 ]] || fail "non-exact OTA artifact returned $status, expected 2"
@@ -1327,7 +1327,7 @@ SH
   valid_ota="$product/lineage_virtio_arm64-ota.zip"
   : >"$valid_ota"
   output=$(bash -c 'source "$1"; find_ota_artifact "$2"' \
-    build-artifact-test "$ROOT/avd/build-lineage-multilib.sh" "$product")
+    build-artifact-test "$ROOT/qemu/build-lineage-multilib.sh" "$product")
   [[ $output == "$valid_ota" ]] || fail "OTA discovery did not return the sole exact artifact"
 
   cleanup_product="$tmp/cleanup/out/target/product/virtio_arm64"
@@ -1341,7 +1341,7 @@ SH
   : >"$cleanup_utm/UTM-VM-old-virtio_arm64only.zip"
   : >"$cleanup_utm/operator-notes.zip"
   bash -c 'source "$1"; clean_target_artifacts "$2"' \
-    build-clean-test "$ROOT/avd/build-lineage-multilib.sh" "$cleanup_product"
+    build-clean-test "$ROOT/qemu/build-lineage-multilib.sh" "$cleanup_product"
   [[ ! -e $cleanup_product/lineage_virtio_arm64-ota.zip ]] || \
     fail "target cleanup left the exact stale OTA"
   [[ ! -e $cleanup_utm/UTM-VM-old-virtio_arm64.zip && \
@@ -1358,7 +1358,7 @@ SH
   mkdir -p "$unsafe_product"
   : >"$unsafe_product/lineage_virtio_arm64-ota.zip"
   assert_status 2 bash -c 'source "$1"; clean_target_artifacts "$2"' \
-    build-clean-test "$ROOT/avd/build-lineage-multilib.sh" "$unsafe_product"
+    build-clean-test "$ROOT/qemu/build-lineage-multilib.sh" "$unsafe_product"
   [[ -e $unsafe_product/lineage_virtio_arm64-ota.zip ]] || \
     fail "target cleanup removed a file outside the current product directory"
 
@@ -1405,7 +1405,7 @@ SH
     FAKE_BUILD_PRODUCT="$source_dir/out/target/product/virtio_arm64" \
     FAKE_BUILD_TARGET_LOG="$build_log" bash -c \
     'source "$1"; validate_build_settings; activate_build_tmp; build_target' build-target-test \
-    "$ROOT/avd/build-lineage-multilib.sh"
+    "$ROOT/qemu/build-lineage-multilib.sh"
   grep -Fq -- $'breakfast\tvirtio_arm64 user\trepo='"$tools_dir/repo"$'\ttmp='"$tmp/build-target/tmp" "$build_log" || \
     fail "breakfast did not resolve repo from the pinned tools directory"
   grep -Fq -- $'m\t-j3 vm-utm-zip otapackage\trepo='"$tools_dir/repo"$'\ttmp='"$tmp/build-target/tmp" "$build_log" || \
@@ -1433,7 +1433,7 @@ SH
     BUILD_TEST_QEMU_IMG_PATH=/usr/bin/true BUILD_TEST_IMAGEMAGICK_TOOLS=true \
     BUILD_TEST_SKIP_PYTHON_MODULES=1 \
     BUILD_TEST_DISK_GIB=999 BUILD_TEST_RAM_GIB=999 BUILD_PREFLIGHT_ONLY=1 \
-    BUILD_ROOT="$root" "$ROOT/avd/build-lineage-multilib.sh" 2>&1)
+    BUILD_ROOT="$root" "$ROOT/qemu/build-lineage-multilib.sh" 2>&1)
   status=$?
   set -e
   [[ $status -eq 2 ]] || fail "missing build tool returned $status, expected 2"
@@ -1583,7 +1583,7 @@ test_provision() {
 
   output=$(HOME="$home" PATH="$bin:/usr/bin:/bin" \
     FAKE_PROVISION_COMMAND_LOG="$log" LINEAGE_MULTILIB_ZIP="$archive" \
-    PROVISION_DRY_RUN=1 "$ROOT/avd/provision.sh")
+    PROVISION_DRY_RUN=1 "$ROOT/qemu/provision.sh")
   assert_line "$output" "[provision] source=$archive"
   assert_line "$output" "[provision] sha256=$before"
   assert_line "$output" \
@@ -1629,7 +1629,7 @@ test_provision() {
     set +e
     output=$(HOME="$home" PATH="$bin:/usr/bin:/bin" \
       FAKE_PROVISION_COMMAND_LOG="$log" LINEAGE_MULTILIB_ZIP="$archive" \
-      PROVISION_DRY_RUN=1 "$ROOT/avd/provision.sh" 2>&1)
+      PROVISION_DRY_RUN=1 "$ROOT/qemu/provision.sh" 2>&1)
     status=$?
     set -e
     [[ $status -eq 2 ]] || {
@@ -1659,7 +1659,7 @@ test_provision() {
     set +e
     output=$(HOME="$home" PATH="$bin:/usr/bin:/bin" \
       FAKE_PROVISION_COMMAND_LOG="$log" LINEAGE_MULTILIB_ZIP="$case_archive" \
-      PROVISION_DRY_RUN=1 "$ROOT/avd/provision.sh" 2>&1)
+      PROVISION_DRY_RUN=1 "$ROOT/qemu/provision.sh" 2>&1)
     status=$?
     set -e
     [[ $status -eq 2 ]] || {
@@ -1681,7 +1681,7 @@ test_provision() {
   touch -t 202607131200 "$newest"
   output=$(HOME="$home" PATH="$bin:/usr/bin:/bin" \
     FAKE_PROVISION_COMMAND_LOG="$log" BUILD_ROOT="$build_root" \
-    PROVISION_DRY_RUN=1 "$ROOT/avd/provision.sh")
+    PROVISION_DRY_RUN=1 "$ROOT/qemu/provision.sh")
   assert_line "$output" "[provision] source=$newest"
 
   mkdir -p "$target"
@@ -1690,7 +1690,7 @@ test_provision() {
   set +e
   output=$(HOME="$home" PATH="$bin:/usr/bin:/bin" \
     FAKE_PROVISION_COMMAND_LOG="$log" LINEAGE_MULTILIB_ZIP="$newest" \
-    "$ROOT/avd/provision.sh" 2>&1)
+    "$ROOT/qemu/provision.sh" 2>&1)
   status=$?
   set -e
   [[ $status -eq 2 ]] || fail "existing target returned $status, expected 2"
@@ -1702,7 +1702,7 @@ test_provision() {
   set +e
   output=$(HOME="$home" PATH="$bin:/usr/bin:/bin" \
     FAKE_QEMU_IMG_MODE=fail FAKE_PROVISION_COMMAND_LOG="$log" \
-    LINEAGE_MULTILIB_ZIP="$newest" "$ROOT/avd/provision.sh" 2>&1)
+    LINEAGE_MULTILIB_ZIP="$newest" "$ROOT/qemu/provision.sh" 2>&1)
   status=$?
   set -e
   [[ $status -eq 42 ]] || fail "injected conversion failure returned $status, expected 42"
@@ -1724,7 +1724,7 @@ SH
     set +e
     output=$(HOME="$home" PATH="$bin:/usr/bin:/bin" \
       FAKE_QEMU_IMG_MODE="$mode" FAKE_PROVISION_COMMAND_LOG="$log" \
-      LINEAGE_MULTILIB_ZIP="$newest" "$ROOT/avd/provision.sh" 2>&1)
+      LINEAGE_MULTILIB_ZIP="$newest" "$ROOT/qemu/provision.sh" 2>&1)
     status=$?
     set -e
     [[ $status -eq 2 ]] || {
@@ -1741,7 +1741,7 @@ SH
   : >"$log"
   output=$(HOME="$home" PATH="$bin:/usr/bin:/bin" \
     FAKE_QEMU_IMG_MODE=pristine FAKE_PROVISION_COMMAND_LOG="$log" \
-    LINEAGE_MULTILIB_ZIP="$newest" "$ROOT/avd/provision.sh")
+    LINEAGE_MULTILIB_ZIP="$newest" "$ROOT/qemu/provision.sh")
   assert_line "$output" "[provision] PASS: published complete multilib rig at $target"
   [[ -f $target/vda.raw ]] || fail "successful provisioning omitted vda.raw"
   python3 - "$target/vda.raw" <<'PY'
@@ -1798,7 +1798,7 @@ SH
   set +e
   output=$(HOME="$home" PATH="$bin:/usr/bin:/bin" \
     FAKE_QEMU_IMG_MODE=copy FAKE_PROVISION_COMMAND_LOG="$log" \
-    LINEAGE_MULTILIB_ZIP="$newest" "$ROOT/avd/provision.sh" 2>&1)
+    LINEAGE_MULTILIB_ZIP="$newest" "$ROOT/qemu/provision.sh" 2>&1)
   status=$?
   set -e
   [[ $status -ne 0 ]] || fail "injected patch failure unexpectedly succeeded"
@@ -1808,7 +1808,7 @@ SH
   boot_home="$tmp/boot-home"
   : >"$log"
   output=$(HOME="$boot_home" PATH="$bin:/usr/bin:/bin" \
-    FAKE_PROVISION_COMMAND_LOG="$log" DRY_RUN=1 "$ROOT/avd/boot-arm64.sh")
+    FAKE_PROVISION_COMMAND_LOG="$log" DRY_RUN=1 "$ROOT/qemu/boot-arm64.sh")
   grep -Fq -- 'qemu-system-aarch64' <<<"$output" || fail "boot dry run omitted ARM QEMU"
   grep -Fq -- '-cpu max,pauth-impdef=on' <<<"$output" || fail "boot dry run omitted ARM CPU"
   grep -Fq -- '-accel tcg,thread=multi,tb-size=1024' <<<"$output" || \
@@ -1823,7 +1823,7 @@ SH
 
   override="$tmp/custom rig"
   output=$(HOME="$boot_home" LINEAGE_DIR="$override" PATH="$bin:/usr/bin:/bin" \
-    FAKE_PROVISION_COMMAND_LOG="$log" DRY_RUN=1 "$ROOT/avd/boot-arm64.sh")
+    FAKE_PROVISION_COMMAND_LOG="$log" DRY_RUN=1 "$ROOT/qemu/boot-arm64.sh")
   grep -Fq -- "$override/vda.raw" <<<"$output" || \
     fail "boot dry run ignored LINEAGE_DIR override"
 

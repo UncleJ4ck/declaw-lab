@@ -46,8 +46,8 @@ Run from the repository root so the source tree, pinned builder snapshot, tools,
 temporary files, and distribution artifacts stay inside this clone:
 
 ```bash
-BUILD_ROOT=$PWD/.lineage-multilib-build ./avd/build-lineage-multilib.sh
-BUILD_ROOT=$PWD/.lineage-multilib-build ./avd/lab qemu provision
+BUILD_ROOT=$PWD/.lineage-multilib-build ./qemu/build-lineage-multilib.sh
+BUILD_ROOT=$PWD/.lineage-multilib-build ./lab qemu provision
 ```
 
 The builder pins the jqssun builder revision, Repo launcher and hash, LineageOS
@@ -94,20 +94,20 @@ matters only for the clean unpinned baseline.
 
 ## Deploy (the `lab` entrypoint)
 
-`avd/lab` gives a pentester one command per backend. The qemu delivery gate is:
+`lab` gives a pentester one command per backend. The qemu delivery gate is:
 
 ```
-./avd/lab qemu up
-./avd/lab qemu root
-./avd/lab qemu check
-./avd/lab qemu install --abi arm64-v8a <X.apkm>
-./avd/lab qemu install --abi armeabi-v7a <Instagram.apkm>
-./avd/lab qemu accept <X.apkm> <Instagram.apkm>
-./avd/lab qemu status
-./avd/lab qemu down
+./lab qemu up
+./lab qemu root
+./lab qemu check
+./lab qemu install --abi arm64-v8a <X.apkm>
+./lab qemu install --abi armeabi-v7a <Instagram.apkm>
+./lab qemu accept <X.apkm> <Instagram.apkm>
+./lab qemu status
+./lab qemu down
 
-./avd/lab avd provision    # separate x86_64 Google-APIs/KVM lane
-./avd/lab avd up | root | shell | status | down
+./lab avd provision    # separate x86_64 Google-APIs/KVM lane
+./lab avd up | root | shell | status | down
 ```
 
 `check` fails closed unless the same live device is Android 16/API 36, rooted,
@@ -116,7 +116,7 @@ both runtime linkers, and `CONFIG_COMPAT` (or a successful 32-bit linker probe).
 
 `accept` validates each supplied APKM's `info.json`, version, package identity,
 native ABI and exact selected splits before device access. It records both
-bundle SHA-256 hashes, installs through `avd/install-app.sh` with explicit ABIs,
+bundle SHA-256 hashes, installs through `shared/install-app.sh` with explicit ABIs,
 and verifies installed `versionCode`, `primaryCpuAbi`, and sorted `pm path`
 basenames. It resolves the currently enabled launcher instead of assuming an
 activity name, uses `am start -W`, and requires two stable observations of the
@@ -157,7 +157,7 @@ mempatch, HWBP, and mempoke helpers are ARM64-only.
 - [x] Root confirmed: `uid=0`, aarch64, Android 16, SELinux Permissive. Boot ~250s.
       Verified declaw-ready: another proc's /proc/pid/mem writable, arm64
       BoringSSL at /apex/com.android.conscrypt/lib64/libssl.so.
-- [x] Packaged as `avd/lab` (qemu + avd backends) + `avd/provision.sh`. Both
+- [x] Packaged as `lab` (qemu + avd backends) + `qemu/provision.sh`. Both
       backends verified live: `lab qemu status` -> uid=0 aarch64 Permissive;
       `lab avd status` -> uid=0 Android 13 x86_64. provision patch logic unit-verified.
 - [x] ARM64 mempatch decryption was proven separately against pinned conscrypt/X.

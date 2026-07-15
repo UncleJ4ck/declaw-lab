@@ -2,8 +2,8 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-CHECKER="$ROOT/avd/check-multilib.sh"
-INSTALLER="$ROOT/avd/install-app.sh"
+CHECKER="$ROOT/qemu/check-multilib.sh"
+INSTALLER="$ROOT/shared/install-app.sh"
 
 usage() {
   echo "usage: $(basename "$0") [--serial SERIAL] --x X.apkm --instagram INSTAGRAM.apkm" >&2

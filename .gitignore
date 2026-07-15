@@ -8,8 +8,8 @@ apks/*/
 !apks/.gitkeep
 
 # MITM runtime artifacts
-avd/mitm/*.pem
-avd/mitm/certs/
+shared/mitm/*.pem
+shared/mitm/certs/
 capture/traffic.log
 
 # python

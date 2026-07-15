@@ -56,7 +56,7 @@ QRUN="$QDIR/run"
 qemu_up() {
   pgrep -f 'qemu-system-aarch64.*declaw-lineage' >/dev/null && { echo "[qemu] already up"; return; }
   [ -f "$QDIR/vda.raw" ] || { echo "[qemu] run 'lab qemu provision' first"; exit 1; }
-  nohup "$HERE/boot-arm64.sh" >/tmp/declaw-qemu.log 2>&1 &
+  nohup "$HERE/qemu/boot-arm64.sh" >/tmp/declaw-qemu.log 2>&1 &
   echo "[qemu] booting (headless, ~4 min first time). tail /tmp/declaw-qemu.log"
 }
 qemu_down() {
@@ -100,7 +100,7 @@ qemu_ensure() {  # boot (if needed) + wait + root; returns with the device up an
     pgrep -f 'qemu-system-aarch64.*declaw-lineage' >/dev/null || { echo "[qemu] boot failed, see /tmp/declaw-qemu.log"; exit 1; }
     sleep 8; adb connect "$QDEV" >/dev/null 2>&1 || true
   done
-  "$HERE/adb-root.sh" >/dev/null 2>&1 || echo "[qemu] warning: root not confirmed"
+  "$HERE/qemu/adb-root.sh" >/dev/null 2>&1 || echo "[qemu] warning: root not confirmed"
 }
 qemu_go() {  # $1 optional capture target (apk / split dir / package)
   qemu_ensure
@@ -114,7 +114,7 @@ qemu_go() {  # $1 optional capture target (apk / split dir / package)
 }
 qemu_check() {
   adb connect "$QDEV" >/dev/null 2>&1 || true
-  "$HERE/check-multilib.sh" "$QDEV"
+  "$HERE/qemu/check-multilib.sh" "$QDEV"
 }
 qemu_install_usage() {
   echo "usage: lab qemu install [--abi arm64-v8a|armeabi-v7a] APP" >&2
@@ -167,8 +167,8 @@ qemu_install_validate() {
 qemu_install() {
   qemu_install_validate "$@" || return
   qemu_ensure
-  "$HERE/check-multilib.sh" "$QDEV"
-  "$HERE/install-app.sh" "$QDEV" "$@"
+  "$HERE/qemu/check-multilib.sh" "$QDEV"
+  "$HERE/shared/install-app.sh" "$QDEV" "$@"
 }
 qemu_accept_usage() {
   echo "usage: lab qemu accept X.apkm INSTAGRAM.apkm" >&2
@@ -193,13 +193,13 @@ qemu_accept_validate() {
 qemu_accept() {
   qemu_accept_validate "$@" || return
   qemu_ensure
-  "$HERE/../tests/accept_multilib_apps.sh" \
+  "$HERE/tests/accept_multilib_apps.sh" \
     --serial "$QDEV" --x "$1" --instagram "$2"
 }
 
 # ---------------------------------------------------------------- avd (x86_64)
 AVD_NAME=declaw_x86_64; AVD_IMG="system-images;android-33;google_apis;x86_64"
-avd_provision() { ABI=x86_64 "$HERE/setup.sh"; echo "no" | avdmanager create avd -n "$AVD_NAME" -k "$AVD_IMG" -d pixel_6 --force >/dev/null; echo "[avd] ready ($AVD_NAME)"; }
+avd_provision() { ABI=x86_64 "$HERE/avd/setup.sh"; echo "no" | avdmanager create avd -n "$AVD_NAME" -k "$AVD_IMG" -d pixel_6 --force >/dev/null; echo "[avd] ready ($AVD_NAME)"; }
 avd_running() { pgrep -f -- "-avd $AVD_NAME" >/dev/null; }
 # adb -e/-d are unreliable when TCP devices (the qemu rig) are also connected, so
 # target the real emulator-<port> serial explicitly.
@@ -248,14 +248,14 @@ avd_go() {  # $1 optional capture target (apk / split dir / package)
 # scrcpy mirrors + controls any adb device, so one UI works for both backends
 # regardless of the qemu display being headless (it captures Android display 0).
 SCRCPY_VER=v4.0
-SCRCPY_DIR="$HERE/../bin/scrcpy-linux-x86_64-${SCRCPY_VER}"
+SCRCPY_DIR="$HERE/bin/scrcpy-linux-x86_64-${SCRCPY_VER}"
 SCRCPY_URL="https://github.com/Genymobile/scrcpy/releases/download/${SCRCPY_VER}/scrcpy-linux-x86_64-${SCRCPY_VER}.tar.gz"
 resolve_scrcpy() {
   type -P scrcpy 2>/dev/null && return
   [ -x "$SCRCPY_DIR/scrcpy" ] && { echo "$SCRCPY_DIR/scrcpy"; return; }
   [ "$(uname -m)" = x86_64 ] || { echo "[ui] install scrcpy (bundled prebuilt is x86_64 only)" >&2; return 1; }
-  mkdir -p "$HERE/../bin"; curl -fsSL "$SCRCPY_URL" -o "$HERE/../bin/scrcpy.tgz" \
-    && tar xzf "$HERE/../bin/scrcpy.tgz" -C "$HERE/../bin" && rm -f "$HERE/../bin/scrcpy.tgz"
+  mkdir -p "$HERE/bin"; curl -fsSL "$SCRCPY_URL" -o "$HERE/bin/scrcpy.tgz" \
+    && tar xzf "$HERE/bin/scrcpy.tgz" -C "$HERE/bin" && rm -f "$HERE/bin/scrcpy.tgz"
   echo "$SCRCPY_DIR/scrcpy"
 }
 ui() {  # $1 serial  $2 label
@@ -273,7 +273,7 @@ ui() {  # $1 serial  $2 label
 # (127.0.0.1:8080) if up, and always to capture/traffic.log.
 GW=10.0.2.2; MITMP="${MITM_PORT:-8083}"
 BURP="${BURP-127.0.0.1:8080}"        # default listener; BURP= (empty) skips Burp, log only
-TRAFFIC_LOG_FILE="$HERE/../capture/traffic.log"
+TRAFFIC_LOG_FILE="$HERE/capture/traffic.log"
 mitm_start() {
   # reuse only if something already listens on OUR port; a mitm on a different port
   # must not make us skip (the DNAT points at $MITMP).
@@ -281,7 +281,7 @@ mitm_start() {
   command -v python3 >/dev/null || { echo "[mitm] need python3"; exit 1; }
   mkdir -p "$(dirname "$TRAFFIC_LOG_FILE")"
   MITM_BIND=0.0.0.0 MITM_PORT="$MITMP" TRAFFIC_LOG="$TRAFFIC_LOG_FILE" BURP="$BURP" \
-    nohup python3 "$HERE/mitm/mitm_fwd.py" >/tmp/declaw-mitm.log 2>&1 &
+    nohup python3 "$HERE/shared/mitm/mitm_fwd.py" >/tmp/declaw-mitm.log 2>&1 &
   sleep 1
 }
 # Tell the pentester exactly where their decrypted traffic goes. The whole point of
@@ -339,7 +339,7 @@ do_capture() {
       [ -n "$device_abi" ] || { echo "[capture] could not read the AVD ABI"; exit 1; }
       install_args+=(--abi "$device_abi")
     fi
-    "$HERE/install-app.sh" "${install_args[@]}" "$arg"
+    "$HERE/shared/install-app.sh" "${install_args[@]}" "$arg"
     arg=""
   fi
   if [ -n "$arg" ]; then local uid; uid="$(app_uid "$1" "$arg")"; [ -n "$uid" ] || { echo "[capture] $arg not installed"; exit 1; }; own="-m owner --uid-owner $uid"; who="$arg (uid $uid)"; vpkg="$arg"; fi
@@ -355,7 +355,7 @@ do_capture() {
   echo "[capture] $who HTTPS -> host MITM (:$MITMP). Following the plaintext log (Ctrl-C stops watching; the redirect stays until 'lab $BACKEND down'):"
   exec tail -n +1 -f "$TRAFFIC_LOG_FILE"
 }
-mitm_stop() { pkill -f 'avd/mitm/mitm_fwd.py' 2>/dev/null || true; }
+mitm_stop() { pkill -f 'shared/mitm/mitm_fwd.py' 2>/dev/null || true; }
 
 # ---------------------------------------------------------------- BRK-probe
 # BoringSSL ships ssl_verify_peer_cert (patch this) and a near-identical
@@ -368,7 +368,7 @@ mempoke_stage() {  # $1=dev ; build (once) + push the peek/poke helper
   if [ ! -x "$bin" ]; then
     command -v aarch64-linux-gnu-gcc >/dev/null || { echo "[probe] need aarch64-linux-gnu-gcc to build mempoke" >&2; return 1; }
     mkdir -p "$HERE/bin"
-    aarch64-linux-gnu-gcc -O2 -static -no-pie -o "$bin" "$HERE/mempoke.c" || return 1
+    aarch64-linux-gnu-gcc -O2 -static -no-pie -o "$bin" "$HERE/qemu/mempoke.c" || return 1
   fi
   adb -s "$dev" push "$bin" /data/local/tmp/mempoke >/dev/null && adb -s "$dev" shell chmod 755 /data/local/tmp/mempoke
 }
@@ -428,10 +428,10 @@ case "$BACKEND:$CMD" in
   qemu:install)   qemu_install "$@" ;;
   qemu:accept)    qemu_accept "$@" ;;
   qemu:probe)     do_probe "$QDEV" "$@" ;;
-  qemu:fetch)     "$HERE/fetch-multilib.sh" "$@" ;;
-  qemu:provision) "$HERE/provision.sh" ;;
+  qemu:fetch)     "$HERE/qemu/fetch-multilib.sh" "$@" ;;
+  qemu:provision) "$HERE/qemu/provision.sh" ;;
   qemu:up)        qemu_up ;;
-  qemu:root)      "$HERE/adb-root.sh" ;;
+  qemu:root)      "$HERE/qemu/adb-root.sh" ;;
   qemu:shell)     adb connect "$QDEV" >/dev/null 2>&1; exec adb -s "$QDEV" shell "$@" ;;
   qemu:ui)        adb connect "$QDEV" >/dev/null 2>&1; ui "$QDEV" qemu ;;
   qemu:status)    qemu_status ;;

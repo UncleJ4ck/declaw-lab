@@ -8,7 +8,7 @@ window, no cert install on the device.
 ## Backends: pick your device
 
 ```
-lab <backend> <command>          # from ./avd/lab
+lab <backend> <command>          # from ./lab
 ```
 
 | Backend | Device | Speed | Root | Use it for |
@@ -28,9 +28,9 @@ The qemu image is a reproducible local LineageOS build. Keep the checkout and al
 build work under this clone:
 
 ```bash
-BUILD_ROOT=$PWD/.lineage-multilib-build ./avd/build-lineage-multilib.sh
-BUILD_ROOT=$PWD/.lineage-multilib-build ./avd/lab qemu provision
-./avd/lab avd provision  # separate x86_64 Google-APIs image + AVD
+BUILD_ROOT=$PWD/.lineage-multilib-build ./qemu/build-lineage-multilib.sh
+BUILD_ROOT=$PWD/.lineage-multilib-build ./lab qemu provision
+./lab avd provision  # separate x86_64 Google-APIs image + AVD
 ```
 
 The build produces `UTM-VM-*-virtio_arm64.zip`, `build-metadata.txt`, and
@@ -44,20 +44,20 @@ Then just name the backend. With no command it boots (if needed), roots, opens t
 interactive window, and drops you in a root shell:
 
 ```bash
-./avd/lab qemu            # -> ARM multilib guest, UI window + root shell
-./avd/lab avd             # -> x86_64 device, UI window + root shell
-./avd/lab                 # -> defaults to qemu
+./lab qemu            # -> ARM multilib guest, UI window + root shell
+./lab avd             # -> x86_64 device, UI window + root shell
+./lab                 # -> defaults to qemu
 ```
 
-The device and window stay up when you leave the shell; `./avd/lab <backend> down` stops it.
+The device and window stay up when you leave the shell; `./lab <backend> down` stops it.
 
 Decrypt an app's HTTPS into Burp with one command. Start Burp (its default proxy
 listener is enough), then pass the app straight to `lab`:
 
 ```bash
-./avd/lab ~/app-patched.apk           # boot + install + send HTTPS to Burp + UI
-./avd/lab com.the.app                 # same for an app already installed
-./avd/lab avd ~/app-patched.apk       # same on the x86_64 emulator
+./lab ~/app-patched.apk           # boot + install + send HTTPS to Burp + UI
+./lab com.the.app                 # same for an app already installed
+./lab avd ~/app-patched.apk       # same on the x86_64 emulator
 ```
 
 A bare apk or package is the pentest one-liner: it boots the device if needed, installs
@@ -67,8 +67,8 @@ and forwards it into Burp. **There is no device CA to install** (that is the who
 declaw is what makes the app accept the cert). Unpatched apps reject it, which is the
 negative control.
 
-Burp: point elsewhere with `BURP=host:port ./avd/lab ...`, or
-`BURP= ./avd/lab ...` to skip Burp and only write `capture/traffic.log`.
+Burp: point elsewhere with `BURP=host:port ./lab ...`, or
+`BURP= ./lab ...` to skip Burp and only write `capture/traffic.log`.
 
 ## Commands
 
@@ -95,15 +95,15 @@ Run the capability gate first, then install either ABI explicitly when working
 with an individual bundle:
 
 ```bash
-./avd/lab qemu check
-./avd/lab qemu install --abi arm64-v8a <X.apkm>
-./avd/lab qemu install --abi armeabi-v7a <Instagram.apkm>
+./lab qemu check
+./lab qemu install --abi arm64-v8a <X.apkm>
+./lab qemu install --abi armeabi-v7a <Instagram.apkm>
 ```
 
 The release gate does both in one boot:
 
 ```bash
-./avd/lab qemu accept <X.apkm> <Instagram.apkm>
+./lab qemu accept <X.apkm> <Instagram.apkm>
 ```
 
 It validates each APKMirror `info.json`, hashes the bundle, records the exact
@@ -154,14 +154,20 @@ No Magisk.
 
 ## Files
 
-- `avd/lab` the entrypoint (both backends).
-- `avd/build-lineage-multilib.sh` pinned LineageOS 23.2 `virtio_arm64` build.
-- `avd/provision.sh` verifies the builder sidecars and creates the rooted-ready disk.
-- `avd/boot-arm64.sh` the tuned qemu-system-aarch64 boot.
-- `avd/check-multilib.sh` fail-closed live ARM32 + ARM64 runtime gate.
-- `avd/install-app.sh` ABI-aware APK/APKM/XAPK/split installer.
+Two backends, one entrypoint. `qemu/` is the arm64 backend (real aarch64 Android via
+`qemu-system-aarch64`), `avd/` is the x86_64 backend (Google emulator), `shared/` is
+backend-neutral tooling.
+
+- `lab` the entrypoint (dispatches both backends).
+- `qemu/build-lineage-multilib.sh` pinned LineageOS 23.2 `virtio_arm64` build.
+- `qemu/provision.sh` verifies the builder sidecars and creates the rooted-ready disk.
+- `qemu/fetch-multilib.sh` download + verify a published image (no build).
+- `qemu/boot-arm64.sh` the tuned qemu-system-aarch64 boot.
+- `qemu/check-multilib.sh` fail-closed live ARM32 + ARM64 runtime gate.
+- `qemu/adb-root.sh` root the running qemu backend.
+- `avd/setup.sh` fetch the Android SDK + a system image (x86_64 backend).
+- `shared/install-app.sh` ABI-aware APK/APKM/XAPK/split installer (both backends).
+- `shared/install-ca.sh` install a CA into the Android 14+ conscrypt APEX store.
+- `shared/mitm/mitm_fwd.py` host forwarding MITM into Burp.
 - `tests/accept_multilib_apps.sh` one-boot X + Instagram process proof.
-- `avd/adb-root.sh` root the running qemu backend.
-- `avd/install-ca.sh` install a CA into the Android 14+ conscrypt APEX store.
-- `avd/setup.sh` fetch the Android SDK + a system image.
 - `docs/arm64-testing.md` why arm64 on x86 is hard, and every wall this rig clears.

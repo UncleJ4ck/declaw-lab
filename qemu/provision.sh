@@ -409,4 +409,4 @@ mv -T -- "$STAGE" "$DIR"
 STAGE=""
 trap - EXIT HUP INT TERM
 echo "[provision] PASS: published complete multilib rig at $DIR"
-echo "[provision] next: avd/lab qemu up && avd/lab qemu check"
+echo "[provision] next: ./lab qemu up && ./lab qemu check"

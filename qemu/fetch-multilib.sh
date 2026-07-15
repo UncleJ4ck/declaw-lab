@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Download a published multilib rig release (UTM-VM-*-virtio_arm64.zip + build-metadata.txt +
-# SHA256SUMS) into the exact layout avd/provision.sh discovers, and verify the zip checksum.
+# SHA256SUMS) into the exact layout qemu/provision.sh discovers, and verify the zip checksum.
 # This is the "download, do not build" path: the heavy source build is a one-time producer
 # cost; every pentester just fetches the published image and runs `lab qemu provision`.
 #
@@ -23,7 +23,7 @@ api_path="repos/$REPO/releases/latest"
 
 if command -v gh >/dev/null 2>&1; then
   json="$(gh api "$api_path" 2>/dev/null)" || \
-    err "no release '$TAG' in $REPO yet. Build the image once (./avd/build-lineage-multilib.sh) and publish it, then fetch."
+    err "no release '$TAG' in $REPO yet. Build the image once (./qemu/build-lineage-multilib.sh) and publish it, then fetch."
 else
   json="$(curl -fsSL --proto '=https' --tlsv1.2 "https://api.github.com/$api_path" 2>/dev/null)" || \
     err "no release '$TAG' in $REPO yet (or GitHub API rate-limited). Build+publish the image first, or set RELEASE_REPO."
