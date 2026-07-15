@@ -19,6 +19,6 @@ __pycache__/
 .lineage-multilib-build/
 dist/
 
-# AI tooling artifacts
+# local tool caches
 .serena/
 .claude/
