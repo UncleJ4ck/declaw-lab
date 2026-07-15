@@ -81,7 +81,7 @@ APK | PKG   boot + install (apk) + send that app's HTTPS to Burp + UI   [pentest
 capture [X] the same, explicit. X = .apk to install, package to scope, or nothing for all apps
 check       prove Android 16, zygote64_32, both ABI lists/runtimes, root and CONFIG_COMPAT
 install [--abi ABI] APP  capability-check, then install an APK/APKM/XAPK/split directory
-accept X I  install and launch X as ARM64 and Instagram as ARM32 in the same qemu boot
+accept A B  install and launch an arm64 app and a 32-bit ARM app in the same qemu boot
 probe P L O confirm L@O is the LIVE ssl_verify_peer_cert in pkg P (BRK; you drive 1 request)
 provision   verify the local multilib build + prepare a rooted-ready image
 up root shell ui   the individual steps (all folded into the default)
@@ -96,14 +96,14 @@ with an individual bundle:
 
 ```bash
 ./lab qemu check
-./lab qemu install --abi arm64-v8a <X.apkm>
-./lab qemu install --abi armeabi-v7a <Instagram.apkm>
+./lab qemu install --abi arm64-v8a <arm64-app.apkm>
+./lab qemu install --abi armeabi-v7a <arm32-app.apkm>
 ```
 
 The release gate does both in one boot:
 
 ```bash
-./lab qemu accept <X.apkm> <Instagram.apkm>
+./lab qemu accept <arm64-app.apkm> <arm32-app.apkm>
 ```
 
 It validates each APKMirror `info.json`, hashes the bundle, records the exact
@@ -111,7 +111,7 @@ selected split names, installs with the production installer, and binds the
 installed `versionCode`, `primaryCpuAbi`, and `pm path` split basenames back to
 that bundle. It resolves each enabled launcher dynamically, launches with
 `am start -W`, then requires a stable main PID whose executable is
-`/system/bin/app_process64` for X and `/system/bin/app_process32` for Instagram.
+`/system/bin/app_process64` for the arm64 app and `/system/bin/app_process32` for the arm32 app.
 The boot ID must remain unchanged throughout. The gate only performs reinstall
 in place (`-r`); it never uninstalls or clears packages, so existing accounts are
 preserved.
@@ -169,5 +169,5 @@ backend-neutral tooling.
 - `shared/install-app.sh` ABI-aware APK/APKM/XAPK/split installer (both backends).
 - `shared/install-ca.sh` install a CA into the Android 14+ conscrypt APEX store.
 - `shared/mitm/mitm_fwd.py` host forwarding MITM into Burp.
-- `tests/accept_multilib_apps.sh` one-boot X + Instagram process proof.
+- `tests/accept_multilib_apps.sh` one-boot arm64 + arm32 process proof.
 - `docs/arm64-testing.md` why arm64 on x86 is hard, and every wall this rig clears.

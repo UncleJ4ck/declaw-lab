@@ -6,7 +6,7 @@ CHECKER="$ROOT/qemu/check-multilib.sh"
 INSTALLER="$ROOT/shared/install-app.sh"
 
 usage() {
-  echo "usage: $(basename "$0") [--serial SERIAL] --x X.apkm --instagram INSTAGRAM.apkm" >&2
+  echo "usage: $(basename "$0") [--serial SERIAL] --arm64 ARM64.apkm --arm32 ARM32.apkm" >&2
   exit 2
 }
 
@@ -21,8 +21,8 @@ runtime_error() {
 }
 
 serial=localhost:6555
-x_source=
-instagram_source=
+arm64_source=
+arm32_source=
 while (($#)); do
   case $1 in
     --serial)
@@ -30,14 +30,14 @@ while (($#)); do
       serial=$2
       shift 2
       ;;
-    --x)
+    --arm64)
       (($# >= 2)) || usage
-      x_source=$2
+      arm64_source=$2
       shift 2
       ;;
-    --instagram)
+    --arm32)
       (($# >= 2)) || usage
-      instagram_source=$2
+      arm32_source=$2
       shift 2
       ;;
     -h|--help)
@@ -49,8 +49,8 @@ while (($#)); do
   esac
 done
 
-[[ -n $x_source && -n $instagram_source ]] || usage
-for source in "$x_source" "$instagram_source"; do
+[[ -n $arm64_source && -n $arm32_source ]] || usage
+for source in "$arm64_source" "$arm32_source"; do
   [[ -f $source ]] || input_error "bundle not found: $source"
   [[ ${source,,} == *.apkm ]] || input_error "expected an APKM bundle: $source"
 done
@@ -83,10 +83,10 @@ trap 'exit 143' TERM
 # Work from one private copy of each operator-supplied bundle. This binds metadata,
 # hashes, selected splits, and the bytes passed to the production installer to the
 # same immutable input even if the Downloads copy changes during a long TCG run.
-x_bundle="$tmpdir/x.apkm"
-instagram_bundle="$tmpdir/instagram.apkm"
-cp -- "$x_source" "$x_bundle"
-cp -- "$instagram_source" "$instagram_bundle"
+arm64_bundle="$tmpdir/arm64.apkm"
+arm32_bundle="$tmpdir/arm32.apkm"
+cp -- "$arm64_source" "$arm64_bundle"
+cp -- "$arm32_source" "$arm32_bundle"
 
 inspect_bundle() {
   local bundle=$1 expected_package=$2 expected_abi=$3 selected_dir=$4 output=$5
@@ -250,30 +250,30 @@ with archive:
 PY
 }
 
-x_meta="$tmpdir/x.meta"
-instagram_meta="$tmpdir/instagram.meta"
-x_selected_dir="$tmpdir/x-selected"
-instagram_selected_dir="$tmpdir/instagram-selected"
-inspect_bundle "$x_bundle" com.twitter.android arm64-v8a "$x_selected_dir" "$x_meta"
-inspect_bundle "$instagram_bundle" com.instagram.android armeabi-v7a "$instagram_selected_dir" "$instagram_meta"
-mapfile -t x_fields <"$x_meta"
-mapfile -t instagram_fields <"$instagram_meta"
-[[ ${#x_fields[@]} -eq 5 && ${#instagram_fields[@]} -eq 5 ]] || \
+arm64_meta="$tmpdir/x.meta"
+arm32_meta="$tmpdir/arm32.meta"
+arm64_selected_dir="$tmpdir/x-selected"
+arm32_selected_dir="$tmpdir/arm32-selected"
+inspect_bundle "$arm64_bundle" com.example.arm64app arm64-v8a "$arm64_selected_dir" "$arm64_meta"
+inspect_bundle "$arm32_bundle" com.example.arm32app armeabi-v7a "$arm32_selected_dir" "$arm32_meta"
+mapfile -t arm64_fields <"$arm64_meta"
+mapfile -t arm32_fields <"$arm32_meta"
+[[ ${#arm64_fields[@]} -eq 5 && ${#arm32_fields[@]} -eq 5 ]] || \
   input_error "internal bundle inspection returned incomplete metadata"
 
-x_version=${x_fields[1]}
-x_version_name=${x_fields[2]}
-x_splits=${x_fields[3]}
-instagram_version=${instagram_fields[1]}
-instagram_version_name=${instagram_fields[2]}
-instagram_splits=${instagram_fields[3]}
-x_split_hashes=${x_fields[4]}
-instagram_split_hashes=${instagram_fields[4]}
-x_sha=$(sha256sum "$x_bundle" | awk '{print $1}')
-instagram_sha=$(sha256sum "$instagram_bundle" | awk '{print $1}')
+arm64_version=${arm64_fields[1]}
+arm64_version_name=${arm64_fields[2]}
+arm64_splits=${arm64_fields[3]}
+arm32_version=${arm32_fields[1]}
+arm32_version_name=${arm32_fields[2]}
+arm32_splits=${arm32_fields[3]}
+arm64_split_hashes=${arm64_fields[4]}
+arm32_split_hashes=${arm32_fields[4]}
+arm64_sha=$(sha256sum "$arm64_bundle" | awk '{print $1}')
+arm32_sha=$(sha256sum "$arm32_bundle" | awk '{print $1}')
 
-echo "[accept] bundle package=com.twitter.android abi=arm64-v8a versionCode=$x_version versionName=$x_version_name sha256=$x_sha splits=$x_splits"
-echo "[accept] bundle package=com.instagram.android abi=armeabi-v7a versionCode=$instagram_version versionName=$instagram_version_name sha256=$instagram_sha splits=$instagram_splits"
+echo "[accept] bundle package=com.example.arm64app abi=arm64-v8a versionCode=$arm64_version versionName=$arm64_version_name sha256=$arm64_sha splits=$arm64_splits"
+echo "[accept] bundle package=com.example.arm32app abi=armeabi-v7a versionCode=$arm32_version versionName=$arm32_version_name sha256=$arm32_sha splits=$arm32_splits"
 
 set +e
 CHECK_ADB_TIMEOUT="$adb_timeout" "$CHECKER" "$serial"
@@ -496,9 +496,9 @@ accept_app() {
   echo "[accept] PASS package=$package abi=$abi exe=$exe"
 }
 
-accept_app com.twitter.android arm64-v8a /system/bin/app_process64 \
-  "$x_bundle" "$x_version" "$x_splits" "$x_selected_dir" "$x_split_hashes"
-accept_app com.instagram.android armeabi-v7a /system/bin/app_process32 \
-  "$instagram_bundle" "$instagram_version" "$instagram_splits" "$instagram_selected_dir" "$instagram_split_hashes"
+accept_app com.example.arm64app arm64-v8a /system/bin/app_process64 \
+  "$arm64_bundle" "$arm64_version" "$arm64_splits" "$arm64_selected_dir" "$arm64_split_hashes"
+accept_app com.example.arm32app armeabi-v7a /system/bin/app_process32 \
+  "$arm32_bundle" "$arm32_version" "$arm32_splits" "$arm32_selected_dir" "$arm32_split_hashes"
 assert_same_boot "at final acceptance"
 echo "[accept] PASS: both architectures launched during the same guest boot"

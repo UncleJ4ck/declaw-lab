@@ -11,7 +11,7 @@
 #   APP | PKG   boot + install (APK/APKM/XAPK/split dir) + send HTTPS to Burp + UI
 #   install [--abi ABI] APP  boot, verify ARM32+ARM64 support, then install (qemu)
 #   check       inspect the already-running qemu guest's ARM32+ARM64 runtime (no boot)
-#   accept X I  install + launch X (ARM64) and Instagram (ARM32) in one qemu boot
+#   accept ARM64 ARM32  install + launch an arm64 app and an arm32 app in one qemu boot
 #   capture [X] same as passing X: X = local app bundle, package to scope, or nothing for
 #               all apps. Decrypts to Burp (127.0.0.1:8080) and capture/traffic.log.
 #   keylog PKG  QUIC/HTTP3 (cronet) is invisible to a MITM: run declaw's friTap key+pcap
@@ -171,7 +171,7 @@ qemu_install() {
   "$HERE/shared/install-app.sh" "$QDEV" "$@"
 }
 qemu_accept_usage() {
-  echo "usage: lab qemu accept X.apkm INSTAGRAM.apkm" >&2
+  echo "usage: lab qemu accept ARM64.apkm ARM32.apkm" >&2
 }
 qemu_accept_validate() {
   local bundle
@@ -194,7 +194,7 @@ qemu_accept() {
   qemu_accept_validate "$@" || return
   qemu_ensure
   "$HERE/tests/accept_multilib_apps.sh" \
-    --serial "$QDEV" --x "$1" --instagram "$2"
+    --serial "$QDEV" --arm64 "$1" --arm32 "$2"
 }
 
 # ---------------------------------------------------------------- avd (x86_64)

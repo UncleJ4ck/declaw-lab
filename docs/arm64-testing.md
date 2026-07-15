@@ -101,8 +101,8 @@ matters only for the clean unpinned baseline.
 ./lab qemu root
 ./lab qemu check
 ./lab qemu install --abi arm64-v8a <X.apkm>
-./lab qemu install --abi armeabi-v7a <Instagram.apkm>
-./lab qemu accept <X.apkm> <Instagram.apkm>
+./lab qemu install --abi armeabi-v7a <arm32-app.apkm>
+./lab qemu accept <arm64-app.apkm> <arm32-app.apkm>
 ./lab qemu status
 ./lab qemu down
 
@@ -120,8 +120,8 @@ bundle SHA-256 hashes, installs through `shared/install-app.sh` with explicit AB
 and verifies installed `versionCode`, `primaryCpuAbi`, and sorted `pm path`
 basenames. It resolves the currently enabled launcher instead of assuming an
 activity name, uses `am start -W`, and requires two stable observations of the
-main PID and executable. X must resolve to `/system/bin/app_process64` and
-Instagram to `/system/bin/app_process32`. Controlled logcat output must contain
+main PID and executable. the arm64 app must resolve to `/system/bin/app_process64` and
+the arm32 app to `/system/bin/app_process32`. Controlled logcat output must contain
 no `INSTALL_FAILED_NO_MATCHING_ABIS`, `UnsatisfiedLinkError`, or `CANNOT LINK
 EXECUTABLE` result, and the boot ID is checked after each launch and again at the
 end.
@@ -160,5 +160,5 @@ mempatch, HWBP, and mempoke helpers are ARM64-only.
 - [x] Packaged as `lab` (qemu + avd backends) + `qemu/provision.sh`. Both
       backends verified live: `lab qemu status` -> uid=0 aarch64 Permissive;
       `lab avd status` -> uid=0 Android 13 x86_64. provision patch logic unit-verified.
-- [x] ARM64 mempatch decryption was proven separately against pinned conscrypt/X.
+- [x] ARM64 mempatch decryption was proven separately against a pinned conscrypt app.
       That does not claim support for an ARMv7 target process.

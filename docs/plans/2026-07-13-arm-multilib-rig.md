@@ -4,7 +4,7 @@
 
 **Goal:** Build and validate one rooted Android 16 QEMU guest that runs both ARM64 and ARMv7 application processes.
 
-**Architecture:** Rebuild the proven LineageOS virtio image with the official `virtio_arm64` multilib product instead of `virtio_arm64only`. Preserve the current QEMU/UEFI boot stack, add fail-closed runtime capability checks and APKM-aware installation, then prove X and Instagram launch under their respective 64-bit and 32-bit Zygotes in one boot.
+**Architecture:** Rebuild the proven LineageOS virtio image with the official `virtio_arm64` multilib product instead of `virtio_arm64only`. Preserve the current QEMU/UEFI boot stack, add fail-closed runtime capability checks and APKM-aware installation, then prove an arm64 app and an arm32 app launch under their respective 64-bit and 32-bit Zygotes in one boot.
 
 **Tech Stack:** Bash, LineageOS 23.2/AOSP build system, repo, QEMU TCG, adb, Python standard-library ZIP fixtures, scrcpy.
 
@@ -68,8 +68,8 @@ Generate tiny APK/APKM fixtures and assert:
 
 ```bash
 avd/install-app.sh localhost:6555 demo.apk
-avd/install-app.sh localhost:6555 "X bundle/"
-avd/install-app.sh localhost:6555 instagram.apkm
+shared/install-app.sh localhost:6555 "arm64 bundle/"
+shared/install-app.sh localhost:6555 arm32-app.apkm
 avd/install-app.sh localhost:6555 --abi armeabi-v7a mixed.apkm
 ```
 
@@ -240,12 +240,12 @@ git commit -m "feat: provision only the complete multilib ARM image"
 
 **Step 1: Write failing acceptance-script contract tests**
 
-Assert the script requires X and Instagram bundle paths, records one boot ID,
+Assert the script requires arm64 and arm32 bundle paths, records one boot ID,
 uses the production installer, launches both packages, and validates:
 
 ```text
-[accept] PASS package=com.twitter.android abi=arm64-v8a exe=/system/bin/app_process64
-[accept] PASS package=com.instagram.android abi=armeabi-v7a exe=/system/bin/app_process32
+[accept] PASS package=com.example.arm64app abi=arm64-v8a exe=/system/bin/app_process64
+[accept] PASS package=com.example.arm32app abi=armeabi-v7a exe=/system/bin/app_process32
 [accept] PASS: both architectures launched during the same guest boot
 ```
 
@@ -260,7 +260,7 @@ Expected: FAIL because the acceptance script does not exist.
 
 **Step 3: Implement the script and docs**
 
-Implement explicit `--x` and `--instagram` arguments plus optional serial.
+Implement explicit `--arm64` and `--arm32` arguments plus optional serial.
 Update docs to call the backend TCG-translated ARM, list exact build/provision
 commands, explain source manifest/checksum artifacts, and distinguish guest ABI
 support from 32-bit declaw mempatch support.
@@ -312,8 +312,8 @@ SELinux, Android 16/API 36, and `CONFIG_COMPAT=y`.
 
 **Step 4: Run both real bundles in one boot**
 
-Run: `tests/accept_multilib_apps.sh --x <X.apkm> --instagram <Instagram.apkm>`
-Expected: X launches through `app_process64`, Instagram through
+Run: `tests/accept_multilib_apps.sh --arm64 <arm64-app.apkm> --arm32 <arm32-app.apkm>`
+Expected: the arm64 app launches through `app_process64`, the arm32 app through
 `app_process32`, with the same boot ID and no ABI/linker errors.
 
 **Step 5: Run existing qemu regressions and record proof**

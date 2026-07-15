@@ -56,9 +56,9 @@ are sent to `adb install-multiple`. An optional `--abi arm64-v8a` or
 `--abi armeabi-v7a` is forwarded to Package Manager. Mixed ABI split sets must
 be selected explicitly; they are never installed ambiguously.
 
-The final acceptance command installs the supplied X and Instagram bundles in
-the same boot and proves process architecture, not just properties: X must use
-`app_process64` with `primaryCpuAbi=arm64-v8a`, while Instagram must use
+The final acceptance command installs the supplied arm64 and arm32 bundles in
+the same boot and proves process architecture, not just properties: the arm64 app must use
+`app_process64` with `primaryCpuAbi=arm64-v8a`, while the arm32 app must use
 `app_process32` with `primaryCpuAbi=armeabi-v7a`.
 
 ## Failure handling

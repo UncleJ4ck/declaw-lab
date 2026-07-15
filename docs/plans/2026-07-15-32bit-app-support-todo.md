@@ -1,7 +1,7 @@
 # TODO: 32-bit (armeabi-v7a) app support in the rig
 
-Goal: run and decrypt 32-bit-only ARM apps (e.g. the armeabi-v7a Instagram build) in the
-declaw-lab rig, the same way the arm64 path already runs and decrypts X/Twitter.
+Goal: run and decrypt 32-bit-only ARM apps (e.g. a 32-bit armeabi-v7a app) in the
+declaw-lab rig, the same way the arm64 path already runs and decrypts an arm64 app.
 
 ## Verified landscape (do NOT re-chase these dead ends)
 
@@ -24,7 +24,7 @@ Conclusion: a MODERN (Android 13+) image that runs 32-bit apps only comes from a
 - [x] `lab qemu fetch [TAG]` downloads + checksum-verifies the release into the layout provision
       expects; `lab qemu provision` then boots it. Pentesters never build.
 - [ ] After a real release exists, run `lab qemu fetch && lab qemu provision && lab qemu accept
-      <X.apkm> <Instagram.apkm>` to prove both ABIs boot in one guest.
+      <arm64-app.apkm> <arm32-app.apkm>` to prove both ABIs boot in one guest.
 
 ## declaw gap for 32-bit decryption (separate from the rig)
 

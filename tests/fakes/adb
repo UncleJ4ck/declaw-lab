@@ -92,8 +92,8 @@ case "$command" in
     if [[ -n ${FAKE_ACCEPT_INSTALLED_ROOT:-} ]]; then
       package=
       case "$abi" in
-        arm64-v8a) package=com.twitter.android ;;
-        armeabi-v7a) package=com.instagram.android ;;
+        arm64-v8a) package=com.example.arm64app ;;
+        armeabi-v7a) package=com.example.arm32app ;;
       esac
       if [[ -n $package && ${FAKE_ACCEPT_SKIP_INSTALL_COPY:-} != "$package" ]]; then
         mkdir -p "$FAKE_ACCEPT_INSTALLED_ROOT/$package"
@@ -114,8 +114,8 @@ case "$command" in
     }
     package=
     case "$remote_path" in
-      *com.twitter.android*) package=com.twitter.android ;;
-      *com.instagram.android*) package=com.instagram.android ;;
+      *com.example.arm64app*) package=com.example.arm64app ;;
+      *com.example.arm32app*) package=com.example.arm32app ;;
     esac
     basename=${remote_path##*/}
     [[ -n $package && -f $FAKE_ACCEPT_INSTALLED_ROOT/$package/$basename ]] || {
@@ -176,48 +176,48 @@ case "$command" in
           echo 11111111-1111-1111-1111-111111111111
         fi
         ;;
-      "dumpsys package com.twitter.android")
+      "dumpsys package com.example.arm64app")
         [[ $profile == accept ]] || exit 95
         printf '  versionCode=%s minSdk=24 targetSdk=36\n' \
-          "${FAKE_ACCEPT_X_VERSION:-312020200}"
-        printf '  primaryCpuAbi=%s\n' "${FAKE_ACCEPT_X_ABI:-arm64-v8a}"
+          "${FAKE_ACCEPT_ARM64_VERSION:-312020200}"
+        printf '  primaryCpuAbi=%s\n' "${FAKE_ACCEPT_ARM64_ABI:-arm64-v8a}"
         ;;
-      "dumpsys package com.instagram.android")
+      "dumpsys package com.example.arm32app")
         [[ $profile == accept ]] || exit 95
         printf '  versionCode=%s minSdk=24 targetSdk=36\n' \
-          "${FAKE_ACCEPT_INSTAGRAM_VERSION:-383611189}"
+          "${FAKE_ACCEPT_ARM32_VERSION:-383611189}"
         printf '  primaryCpuAbi=%s\n' \
-          "${FAKE_ACCEPT_INSTAGRAM_ABI:-armeabi-v7a}"
+          "${FAKE_ACCEPT_ARM32_ABI:-armeabi-v7a}"
         ;;
-      "pm path com.twitter.android")
+      "pm path com.example.arm64app")
         [[ $profile == accept ]] || exit 95
         IFS=, read -r -a splits <<< \
-          "${FAKE_ACCEPT_X_SPLITS:-base.apk,split_config.arm64_v8a.apk,split_config.en.apk}"
+          "${FAKE_ACCEPT_ARM64_SPLITS:-base.apk,split_config.arm64_v8a.apk,split_config.en.apk}"
         for split in "${splits[@]}"; do
-          printf 'package:/data/app/com.twitter.android/%s\n' "$split"
+          printf 'package:/data/app/com.example.arm64app/%s\n' "$split"
         done
         ;;
-      "pm path com.instagram.android")
+      "pm path com.example.arm32app")
         [[ $profile == accept ]] || exit 95
         IFS=, read -r -a splits <<< \
-          "${FAKE_ACCEPT_INSTAGRAM_SPLITS:-base.apk,split_config.en.apk}"
+          "${FAKE_ACCEPT_ARM32_SPLITS:-base.apk,split_config.en.apk}"
         for split in "${splits[@]}"; do
-          printf 'package:/data/app/com.instagram.android/%s\n' "$split"
+          printf 'package:/data/app/com.example.arm32app/%s\n' "$split"
         done
         ;;
-      "cmd package resolve-activity --brief --components --user 0 -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -p com.twitter.android")
+      "cmd package resolve-activity --brief --components --user 0 -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -p com.example.arm64app")
         [[ $profile == accept ]] || exit 95
-        echo "${FAKE_ACCEPT_X_COMPONENT:-com.twitter.android/.StartActivity}"
+        echo "${FAKE_ACCEPT_ARM64_COMPONENT:-com.example.arm64app/.StartActivity}"
         ;;
-      "cmd package resolve-activity --brief --components --user 0 -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -p com.instagram.android")
+      "cmd package resolve-activity --brief --components --user 0 -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -p com.example.arm32app")
         [[ $profile == accept ]] || exit 95
-        echo "${FAKE_ACCEPT_INSTAGRAM_COMPONENT:-com.instagram.android/.MainActivity}"
+        echo "${FAKE_ACCEPT_ARM32_COMPONENT:-com.example.arm32app/.MainActivity}"
         ;;
-      "am force-stop com.twitter.android"|"am force-stop com.instagram.android")
+      "am force-stop com.example.arm64app"|"am force-stop com.example.arm32app")
         [[ $profile == accept ]] || exit 95
         ;;
-      "am start -W -n com.twitter.android/.StartActivity"|\
-      "am start -W -n com.instagram.android/.MainActivity")
+      "am start -W -n com.example.arm64app/.StartActivity"|\
+      "am start -W -n com.example.arm32app/.MainActivity")
         [[ $profile == accept ]] || exit 95
         echo "Status: ok"
         ;;
@@ -228,21 +228,21 @@ case "$command" in
         [[ $profile == accept ]] || exit 95
         printf '%s\n' "${FAKE_ACCEPT_LOGCAT:-I/ActivityTaskManager: Displayed activity}"
         ;;
-      "pidof com.twitter.android")
+      "pidof com.example.arm64app")
         [[ $profile == accept ]] || exit 95
-        [[ ${FAKE_ACCEPT_MISSING_PID:-} != com.twitter.android ]] && echo 6401
+        [[ ${FAKE_ACCEPT_MISSING_PID:-} != com.example.arm64app ]] && echo 6401
         ;;
-      "pidof com.instagram.android")
+      "pidof com.example.arm32app")
         [[ $profile == accept ]] || exit 95
-        [[ ${FAKE_ACCEPT_MISSING_PID:-} != com.instagram.android ]] && echo 3201
+        [[ ${FAKE_ACCEPT_MISSING_PID:-} != com.example.arm32app ]] && echo 3201
         ;;
       "readlink /proc/6401/exe")
         [[ $profile == accept ]] || exit 95
-        echo "${FAKE_ACCEPT_X_EXE:-/system/bin/app_process64}"
+        echo "${FAKE_ACCEPT_ARM64_EXE:-/system/bin/app_process64}"
         ;;
       "readlink /proc/3201/exe")
         [[ $profile == accept ]] || exit 95
-        echo "${FAKE_ACCEPT_INSTAGRAM_EXE:-/system/bin/app_process32}"
+        echo "${FAKE_ACCEPT_ARM32_EXE:-/system/bin/app_process32}"
         ;;
       *CONFIG_COMPAT*)
         case $profile in

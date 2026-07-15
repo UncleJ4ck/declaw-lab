@@ -287,44 +287,44 @@ test_installer() {
     fail "single APK install did not forward --abi arm64-v8a to adb"
 
   : >"$install_log"
-  mkdir "$tmp/X bundle"
-  make_apk "$tmp/X bundle/base.apk"
-  make_apk "$tmp/X bundle/feature with spaces.apk"
-  make_apk "$tmp/X bundle/split_config.arm64_v8a.apk" \
+  mkdir "$tmp/arm64 bundle"
+  make_apk "$tmp/arm64 bundle/base.apk"
+  make_apk "$tmp/arm64 bundle/feature with spaces.apk"
+  make_apk "$tmp/arm64 bundle/split_config.arm64_v8a.apk" \
     lib/arm64-v8a/libfixture.so
-  printf 'not an apk\n' >"$tmp/X bundle/read me.txt"
+  printf 'not an apk\n' >"$tmp/arm64 bundle/read me.txt"
   PATH="$FAKES:$PATH" FAKE_ADB_PROFILE=installer \
     FAKE_ADB_INSTALL_LOG="$install_log" \
-    "$ROOT/shared/install-app.sh" test-serial "$tmp/X bundle" >/dev/null
+    "$ROOT/shared/install-app.sh" test-serial "$tmp/arm64 bundle" >/dev/null
   assert_line "$(<"$install_log")" \
     $'install-multiple\tbase.apk\tfeature with spaces.apk\tsplit_config.arm64_v8a.apk'
 
   : >"$install_log"
-  mkdir "$tmp/instagram-source"
-  make_apk "$tmp/instagram-source/base.apk" lib/armeabi-v7a/libinstagram.so
-  make_apk "$tmp/instagram-source/split_config.xhdpi.apk"
-  make_apk "$tmp/instagram-source/split_config.x86_64.apk"
-  printf '{"name":"Instagram"}\n' >"$tmp/instagram-source/info.json"
-  make_bundle "$tmp/instagram.apkm" "$tmp/instagram-source"
+  mkdir "$tmp/arm32-source"
+  make_apk "$tmp/arm32-source/base.apk" lib/armeabi-v7a/libarm32.so
+  make_apk "$tmp/arm32-source/split_config.xhdpi.apk"
+  make_apk "$tmp/arm32-source/split_config.x86_64.apk"
+  printf '{"name":"arm32"}\n' >"$tmp/arm32-source/info.json"
+  make_bundle "$tmp/arm32.apkm" "$tmp/arm32-source"
   PATH="$FAKES:$PATH" FAKE_ADB_PROFILE=installer \
     FAKE_ADB_INSTALL_LOG="$install_log" \
-    "$ROOT/shared/install-app.sh" test-serial "$tmp/instagram.apkm" >/dev/null
+    "$ROOT/shared/install-app.sh" test-serial "$tmp/arm32.apkm" >/dev/null
   assert_line "$(<"$install_log")" \
     $'install-multiple\tbase.apk\tsplit_config.xhdpi.apk'
 
   : >"$install_log"
-  mkdir "$tmp/whatsapp-source"
-  make_apk "$tmp/whatsapp-source/com.whatsapp.apk" \
-    lib/armeabi-v7a/libwhatsapp.so
-  make_apk "$tmp/whatsapp-source/config.armeabi_v7a.apk" \
+  mkdir "$tmp/xapkapp-source"
+  make_apk "$tmp/xapkapp-source/com.xapkapp.apk" \
+    lib/armeabi-v7a/libxapkapp.so
+  make_apk "$tmp/xapkapp-source/config.armeabi_v7a.apk" \
     lib/armeabi-v7a/libfixture.so
-  printf '{"xapk_version":2}\n' >"$tmp/whatsapp-source/manifest.json"
-  make_bundle "$tmp/whatsapp.xapk" "$tmp/whatsapp-source"
+  printf '{"xapk_version":2}\n' >"$tmp/xapkapp-source/manifest.json"
+  make_bundle "$tmp/xapkapp.xapk" "$tmp/xapkapp-source"
   PATH="$FAKES:$PATH" FAKE_ADB_PROFILE=installer \
     FAKE_ADB_INSTALL_LOG="$install_log" \
-    "$ROOT/shared/install-app.sh" test-serial "$tmp/whatsapp.xapk" >/dev/null
+    "$ROOT/shared/install-app.sh" test-serial "$tmp/xapkapp.xapk" >/dev/null
   assert_line "$(<"$install_log")" \
-    $'install-multiple\tcom.whatsapp.apk\tconfig.armeabi_v7a.apk'
+    $'install-multiple\tcom.xapkapp.apk\tconfig.armeabi_v7a.apk'
 
   : >"$install_log"
   mkdir "$tmp/mixed-source"
@@ -418,7 +418,7 @@ test_installer() {
   set +e
   output=$(PATH="$FAKES:$PATH" FAKE_ADB_PROFILE=installer \
     "$ROOT/shared/install-app.sh" test-serial --abi armeabi-v7a \
-    "$tmp/X bundle" 2>&1)
+    "$tmp/arm64 bundle" 2>&1)
   status=$?
   set -e
   [[ $status -eq 2 ]] || fail "absent requested ABI returned $status, expected 2"
@@ -450,8 +450,8 @@ test_installer() {
 }
 
 test_acceptance() {
-  local tmp x_bundle instagram_bundle wrong_identity wrong_abi wrong_version
-  local log install_log boot_calls installed_root output status x_sha instagram_sha
+  local tmp arm64_bundle arm32_bundle wrong_identity wrong_abi wrong_version
+  local log install_log boot_calls installed_root output status arm64_sha arm32_sha
   tmp=$(mktemp -d)
   log="$tmp/adb.log"
   install_log="$tmp/install.log"
@@ -459,18 +459,18 @@ test_acceptance() {
   installed_root="$tmp/installed"
   trap 'rm -rf "$tmp"' RETURN
 
-  x_bundle="$tmp/X production bundle.apkm"
-  instagram_bundle="$tmp/Instagram production bundle.apkm"
-  wrong_identity="$tmp/not X.apkm"
-  wrong_abi="$tmp/wrong ABI Instagram.apkm"
-  wrong_version="$tmp/wrong X version.apkm"
-  make_accept_bundle "$x_bundle" com.twitter.android 312020200 12.2.0-alpha.0 arm64-v8a
-  make_accept_bundle "$instagram_bundle" com.instagram.android 383611189 430.0.0.53.80 armeabi-v7a
+  arm64_bundle="$tmp/arm64 production bundle.apkm"
+  arm32_bundle="$tmp/arm32 production bundle.apkm"
+  wrong_identity="$tmp/not arm64.apkm"
+  wrong_abi="$tmp/wrong ABI arm32.apkm"
+  wrong_version="$tmp/wrong arm64 version.apkm"
+  make_accept_bundle "$arm64_bundle" com.example.arm64app 312020200 12.2.0-alpha.0 arm64-v8a
+  make_accept_bundle "$arm32_bundle" com.example.arm32app 383611189 430.0.0.53.80 armeabi-v7a
   make_accept_bundle "$wrong_identity" com.example.notx 312020200 12.2.0-alpha.0 arm64-v8a
-  make_accept_bundle "$wrong_abi" com.instagram.android 383611189 430.0.0.53.80 x86_64
-  make_accept_bundle "$wrong_version" com.twitter.android 999999999 wrong arm64-v8a
-  x_sha=$(sha256sum "$x_bundle" | awk '{print $1}')
-  instagram_sha=$(sha256sum "$instagram_bundle" | awk '{print $1}')
+  make_accept_bundle "$wrong_abi" com.example.arm32app 383611189 430.0.0.53.80 x86_64
+  make_accept_bundle "$wrong_version" com.example.arm64app 999999999 wrong arm64-v8a
+  arm64_sha=$(sha256sum "$arm64_bundle" | awk '{print $1}')
+  arm32_sha=$(sha256sum "$arm32_bundle" | awk '{print $1}')
 
   run_acceptance() {
     PATH="$FAKES:$PATH" FAKE_ADB_PROFILE="${FAKE_ACCEPT_PROFILE:-accept}" FAKE_ADB_LOG="$log" \
@@ -478,7 +478,7 @@ test_acceptance() {
       FAKE_ACCEPT_INSTALLED_ROOT="$installed_root" \
       FAKE_ACCEPT_BOOT_CALLS_FILE="$boot_calls" ACCEPT_POLL_ATTEMPTS=3 \
       ACCEPT_POLL_INTERVAL=0 "$ROOT/tests/accept_multilib_apps.sh" \
-      --serial test-serial --x "$x_bundle" --instagram "$instagram_bundle"
+      --serial test-serial --arm64 "$arm64_bundle" --arm32 "$arm32_bundle"
   }
   reset_acceptance_logs() {
     : >"$log"
@@ -490,11 +490,11 @@ test_acceptance() {
 
   assert_status 2 "$ROOT/tests/accept_multilib_apps.sh"
   assert_status 2 "$ROOT/tests/accept_multilib_apps.sh" \
-    --serial test-serial --x "$x_bundle"
+    --serial test-serial --arm64 "$arm64_bundle"
   assert_status 2 "$ROOT/tests/accept_multilib_apps.sh" \
-    --serial test-serial --x "$tmp/missing.apkm" --instagram "$instagram_bundle"
+    --serial test-serial --arm64 "$tmp/missing.apkm" --arm32 "$arm32_bundle"
   assert_status 2 env ACCEPT_ADB_TIMEOUT=0 "$ROOT/tests/accept_multilib_apps.sh" \
-    --serial test-serial --x "$x_bundle" --instagram "$instagram_bundle"
+    --serial test-serial --arm64 "$arm64_bundle" --arm32 "$arm32_bundle"
 
   reset_acceptance_logs
   PATH="$FAKES:$PATH" FAKE_ADB_PROFILE=accept FAKE_ADB_LOG="$log" \
@@ -502,22 +502,22 @@ test_acceptance() {
     FAKE_ACCEPT_INSTALLED_ROOT="$installed_root" \
     FAKE_ACCEPT_BOOT_CALLS_FILE="$boot_calls" ACCEPT_POLL_ATTEMPTS=3 \
     ACCEPT_POLL_INTERVAL=0 "$ROOT/tests/accept_multilib_apps.sh" \
-    --x "$x_bundle" --instagram "$instagram_bundle" >/dev/null
+    --arm64 "$arm64_bundle" --arm32 "$arm32_bundle" >/dev/null
   grep -Eq -- '^-s localhost:6555( |$)' "$log" || \
     fail "acceptance did not default to the qemu TCP serial"
 
   reset_acceptance_logs
   output=$(run_acceptance)
   assert_line "$output" \
-    "[accept] bundle package=com.twitter.android abi=arm64-v8a versionCode=312020200 versionName=12.2.0-alpha.0 sha256=$x_sha splits=base.apk,split_config.arm64_v8a.apk,split_config.en.apk"
+    "[accept] bundle package=com.example.arm64app abi=arm64-v8a versionCode=312020200 versionName=12.2.0-alpha.0 sha256=$arm64_sha splits=base.apk,split_config.arm64_v8a.apk,split_config.en.apk"
   assert_line "$output" \
-    "[accept] bundle package=com.instagram.android abi=armeabi-v7a versionCode=383611189 versionName=430.0.0.53.80 sha256=$instagram_sha splits=base.apk,split_config.en.apk"
+    "[accept] bundle package=com.example.arm32app abi=armeabi-v7a versionCode=383611189 versionName=430.0.0.53.80 sha256=$arm32_sha splits=base.apk,split_config.en.apk"
   assert_line "$output" \
     "[accept] boot_id=11111111-1111-1111-1111-111111111111"
   assert_line "$output" \
-    "[accept] PASS package=com.twitter.android abi=arm64-v8a exe=/system/bin/app_process64"
+    "[accept] PASS package=com.example.arm64app abi=arm64-v8a exe=/system/bin/app_process64"
   assert_line "$output" \
-    "[accept] PASS package=com.instagram.android abi=armeabi-v7a exe=/system/bin/app_process32"
+    "[accept] PASS package=com.example.arm32app abi=armeabi-v7a exe=/system/bin/app_process32"
   assert_line "$output" \
     "[accept] PASS: both architectures launched during the same guest boot"
   [[ $(<"$boot_calls") == 4 ]] || \
@@ -531,15 +531,15 @@ test_acceptance() {
   grep -Fq -- 'install-multiple -r --abi armeabi-v7a' "$log" || \
     fail "acceptance did not use the production installer with explicit armeabi-v7a"
   grep -Fq -- \
-    'cmd package resolve-activity --brief --components --user 0 -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -p com.twitter.android' "$log" || \
-    fail "acceptance did not dynamically resolve X's enabled launcher"
+    'cmd package resolve-activity --brief --components --user 0 -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -p com.example.arm64app' "$log" || \
+    fail "acceptance did not dynamically resolve arm64 app's enabled launcher"
   grep -Fq -- \
-    'cmd package resolve-activity --brief --components --user 0 -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -p com.instagram.android' "$log" || \
-    fail "acceptance did not dynamically resolve Instagram's enabled launcher"
-  grep -Fq -- 'am start -W -n com.twitter.android/.StartActivity' "$log" || \
-    fail "acceptance did not launch the resolved X component with -W"
-  grep -Fq -- 'am start -W -n com.instagram.android/.MainActivity' "$log" || \
-    fail "acceptance did not launch the resolved Instagram component with -W"
+    'cmd package resolve-activity --brief --components --user 0 -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -p com.example.arm32app' "$log" || \
+    fail "acceptance did not dynamically resolve arm32's enabled launcher"
+  grep -Fq -- 'am start -W -n com.example.arm64app/.StartActivity' "$log" || \
+    fail "acceptance did not launch the resolved arm64 app component with -W"
+  grep -Fq -- 'am start -W -n com.example.arm32app/.MainActivity' "$log" || \
+    fail "acceptance did not launch the resolved arm32 component with -W"
   if grep -Eq ' uninstall( |$)| pm clear( |$)| clear-data' "$log"; then
     fail "acceptance cleared or uninstalled account state"
   fi
@@ -548,14 +548,14 @@ test_acceptance() {
   fi
 
   reset_acceptance_logs
-  mkdir -p "$installed_root/com.twitter.android"
-  printf 'pre-existing wrong base\n' >"$installed_root/com.twitter.android/base.apk"
+  mkdir -p "$installed_root/com.example.arm64app"
+  printf 'pre-existing wrong base\n' >"$installed_root/com.example.arm64app/base.apk"
   printf 'pre-existing wrong arm64 split\n' \
-    >"$installed_root/com.twitter.android/split_config.arm64_v8a.apk"
+    >"$installed_root/com.example.arm64app/split_config.arm64_v8a.apk"
   printf 'pre-existing wrong language split\n' \
-    >"$installed_root/com.twitter.android/split_config.en.apk"
+    >"$installed_root/com.example.arm64app/split_config.en.apk"
   set +e
-  output=$(FAKE_ACCEPT_SKIP_INSTALL_COPY=com.twitter.android run_acceptance 2>&1)
+  output=$(FAKE_ACCEPT_SKIP_INSTALL_COPY=com.example.arm64app run_acceptance 2>&1)
   status=$?
   set -e
   [[ $status -eq 1 ]] || fail "installed byte mismatch returned $status, expected 1"
@@ -566,32 +566,32 @@ test_acceptance() {
   set +e
   output=$(PATH="$FAKES:$PATH" FAKE_ADB_PROFILE=accept FAKE_ADB_LOG="$log" \
     FAKE_ACCEPT_BOOT_CALLS_FILE="$boot_calls" "$ROOT/tests/accept_multilib_apps.sh" \
-    --serial test-serial --x "$wrong_identity" --instagram "$instagram_bundle" 2>&1)
+    --serial test-serial --arm64 "$wrong_identity" --arm32 "$arm32_bundle" 2>&1)
   status=$?
   set -e
-  [[ $status -eq 2 ]] || fail "wrong X identity returned $status, expected 2"
-  grep -Fq -- 'expected package com.twitter.android' <<<"$output" || \
-    fail "wrong X identity omitted the semantic package error"
-  [[ ! -s $log ]] || fail "wrong X identity accessed adb before local validation"
+  [[ $status -eq 2 ]] || fail "wrong arm64 identity returned $status, expected 2"
+  grep -Fq -- 'expected package com.example.arm64app' <<<"$output" || \
+    fail "wrong arm64 identity omitted the semantic package error"
+  [[ ! -s $log ]] || fail "wrong arm64 identity accessed adb before local validation"
 
   reset_acceptance_logs
   set +e
   output=$(PATH="$FAKES:$PATH" FAKE_ADB_PROFILE=accept FAKE_ADB_LOG="$log" \
     FAKE_ACCEPT_BOOT_CALLS_FILE="$boot_calls" "$ROOT/tests/accept_multilib_apps.sh" \
-    --serial test-serial --x "$x_bundle" --instagram "$wrong_abi" 2>&1)
+    --serial test-serial --arm64 "$arm64_bundle" --arm32 "$wrong_abi" 2>&1)
   status=$?
   set -e
-  [[ $status -eq 2 ]] || fail "wrong Instagram ABI returned $status, expected 2"
+  [[ $status -eq 2 ]] || fail "wrong arm32 ABI returned $status, expected 2"
   grep -Fq -- 'does not contain native ABI armeabi-v7a' <<<"$output" || \
-    fail "wrong Instagram ABI omitted the native-ABI error"
-  [[ ! -s $log ]] || fail "wrong Instagram ABI accessed adb before local validation"
+    fail "wrong arm32 ABI omitted the native-ABI error"
+  [[ ! -s $log ]] || fail "wrong arm32 ABI accessed adb before local validation"
 
   reset_acceptance_logs
   set +e
   output=$(PATH="$FAKES:$PATH" FAKE_ADB_PROFILE=accept FAKE_ADB_LOG="$log" \
     FAKE_ADB_INSTALL_LOG="$install_log" FAKE_ACCEPT_BOOT_CALLS_FILE="$boot_calls" \
     ACCEPT_POLL_INTERVAL=0 "$ROOT/tests/accept_multilib_apps.sh" \
-    --serial test-serial --x "$wrong_version" --instagram "$instagram_bundle" 2>&1)
+    --serial test-serial --arm64 "$wrong_version" --arm32 "$arm32_bundle" 2>&1)
   status=$?
   set -e
   [[ $status -eq 1 ]] || fail "installed version mismatch returned $status, expected 1"
@@ -600,7 +600,7 @@ test_acceptance() {
 
   reset_acceptance_logs
   set +e
-  output=$(FAKE_ACCEPT_X_SPLITS='base.apk,split_config.en.apk' run_acceptance 2>&1)
+  output=$(FAKE_ACCEPT_ARM64_SPLITS='base.apk,split_config.en.apk' run_acceptance 2>&1)
   status=$?
   set -e
   [[ $status -eq 1 ]] || fail "installed split mismatch returned $status, expected 1"
@@ -609,7 +609,7 @@ test_acceptance() {
 
   reset_acceptance_logs
   set +e
-  output=$(FAKE_ACCEPT_INSTAGRAM_EXE=/system/bin/app_process64 run_acceptance 2>&1)
+  output=$(FAKE_ACCEPT_ARM32_EXE=/system/bin/app_process64 run_acceptance 2>&1)
   status=$?
   set -e
   [[ $status -eq 1 ]] || fail "wrong process executable returned $status, expected 1"
@@ -618,7 +618,7 @@ test_acceptance() {
 
   reset_acceptance_logs
   set +e
-  output=$(FAKE_ACCEPT_X_ABI=armeabi-v7a run_acceptance 2>&1)
+  output=$(FAKE_ACCEPT_ARM64_ABI=armeabi-v7a run_acceptance 2>&1)
   status=$?
   set -e
   [[ $status -eq 1 ]] || fail "wrong primaryCpuAbi returned $status, expected 1"
@@ -660,7 +660,7 @@ test_acceptance() {
   status=$?
   set -e
   [[ $status -eq 1 ]] || fail "hung production installer returned $status, expected 1"
-  grep -Fq -- 'installer timed out while installing com.twitter.android' <<<"$output" || \
+  grep -Fq -- 'installer timed out while installing com.example.arm64app' <<<"$output" || \
     fail "hung production installer omitted timeout context"
 
   reset_acceptance_logs
@@ -683,11 +683,11 @@ test_acceptance() {
 
   reset_acceptance_logs
   set +e
-  output=$(FAKE_ACCEPT_MISSING_PID=com.twitter.android run_acceptance 2>&1)
+  output=$(FAKE_ACCEPT_MISSING_PID=com.example.arm64app run_acceptance 2>&1)
   status=$?
   set -e
   [[ $status -eq 1 ]] || fail "missing main PID returned $status, expected 1"
-  grep -Fq -- 'stable main PID not found for com.twitter.android' <<<"$output" || \
+  grep -Fq -- 'stable main PID not found for com.example.arm64app' <<<"$output" || \
     fail "missing PID omitted a useful process error"
 
   grep -Fq -- \
@@ -697,7 +697,7 @@ test_acceptance() {
     fail "README omitted the live multilib gate"
   grep -Fq -- './lab qemu install --abi armeabi-v7a' "$ROOT/README.md" || \
     fail "README omitted explicit ARM32 installation"
-  grep -Fq -- './lab qemu accept <X.apkm> <Instagram.apkm>' "$ROOT/README.md" || \
+  grep -Fq -- './lab qemu accept <arm64-app.apkm> <arm32-app.apkm>' "$ROOT/README.md" || \
     fail "README omitted the one-boot acceptance command"
   grep -Fq -- 'build-metadata.txt' "$ROOT/README.md" || \
     fail "README omitted builder provenance metadata"
@@ -828,7 +828,7 @@ run_lab() {
 
 test_dispatch() {
   local tmp home bin log argv_log install_log installed_root output status check_line install_line path
-  local x_bundle instagram_bundle boot_calls
+  local arm64_bundle arm32_bundle boot_calls
   tmp=$(mktemp -d)
   home="$tmp/home"
   bin="$tmp/bin"
@@ -887,11 +887,11 @@ test_dispatch() {
   : >"$home/Android/lineage-multilib/vda.raw"
   : >"$log"
   make_apk "$tmp/demo app.apk" lib/arm64-v8a/libdemo.so
-  x_bundle="$tmp/X dispatch.apkm"
-  instagram_bundle="$tmp/Instagram dispatch.apkm"
+  arm64_bundle="$tmp/arm64 dispatch.apkm"
+  arm32_bundle="$tmp/arm32 dispatch.apkm"
   boot_calls="$tmp/dispatch-boot-calls"
-  make_accept_bundle "$x_bundle" com.twitter.android 312020200 12.2.0-alpha.0 arm64-v8a
-  make_accept_bundle "$instagram_bundle" com.instagram.android 383611189 430.0.0.53.80 armeabi-v7a
+  make_accept_bundle "$arm64_bundle" com.example.arm64app 312020200 12.2.0-alpha.0 arm64-v8a
+  make_accept_bundle "$arm32_bundle" com.example.arm32app 383611189 430.0.0.53.80 armeabi-v7a
   assert_qemu_install_preflight_rejects \
     "usage: lab qemu install [--abi arm64-v8a|armeabi-v7a] APP"
   assert_qemu_install_preflight_rejects \
@@ -935,7 +935,7 @@ test_dispatch() {
   status=$?
   set -e
   [[ $status -eq 2 ]] || fail "qemu accept without bundles returned $status, expected 2"
-  grep -Fq -- 'usage: lab qemu accept X.apkm INSTAGRAM.apkm' <<<"$output" || \
+  grep -Fq -- 'usage: lab qemu accept ARM64.apkm ARM32.apkm' <<<"$output" || \
     fail "qemu accept without bundles omitted usage"
   [[ ! -s $log ]] || fail "invalid qemu accept accessed a process or device"
 
@@ -943,12 +943,12 @@ test_dispatch() {
   set +e
   output=$(FAKE_LAB_COMMAND_LOG="$log" FAKE_FORBID_ADB=1 \
     FAKE_FORBID_PGREP=1 run_lab "$home" "$bin" qemu accept \
-    "$tmp/missing.apkm" "$instagram_bundle" 2>&1)
+    "$tmp/missing.apkm" "$arm32_bundle" 2>&1)
   status=$?
   set -e
-  [[ $status -eq 2 ]] || fail "qemu accept missing X bundle returned $status, expected 2"
+  [[ $status -eq 2 ]] || fail "qemu accept missing arm64 bundle returned $status, expected 2"
   grep -Fq -- "bundle not found: $tmp/missing.apkm" <<<"$output" || \
-    fail "qemu accept missing X bundle omitted its path"
+    fail "qemu accept missing arm64 bundle omitted its path"
   [[ ! -s $log ]] || fail "missing qemu accept bundle accessed a process or device"
 
   : >"$log"
@@ -961,11 +961,11 @@ test_dispatch() {
     FAKE_ACCEPT_INSTALLED_ROOT="$installed_root" \
     FAKE_ACCEPT_BOOT_CALLS_FILE="$boot_calls" ACCEPT_POLL_ATTEMPTS=3 \
     ACCEPT_POLL_INTERVAL=0 run_lab "$home" "$bin" qemu accept \
-    "$x_bundle" "$instagram_bundle")
+    "$arm64_bundle" "$arm32_bundle")
   assert_line "$output" \
-    "[accept] PASS package=com.twitter.android abi=arm64-v8a exe=/system/bin/app_process64"
+    "[accept] PASS package=com.example.arm64app abi=arm64-v8a exe=/system/bin/app_process64"
   assert_line "$output" \
-    "[accept] PASS package=com.instagram.android abi=armeabi-v7a exe=/system/bin/app_process32"
+    "[accept] PASS package=com.example.arm32app abi=armeabi-v7a exe=/system/bin/app_process32"
   assert_line "$output" \
     "[accept] PASS: both architectures launched during the same guest boot"
 
@@ -973,7 +973,7 @@ test_dispatch() {
   set +e
   output=$(FAKE_LAB_COMMAND_LOG="$log" FAKE_FORBID_ADB=1 \
     FAKE_FORBID_PGREP=1 run_lab "$home" "$bin" avd accept \
-    "$x_bundle" "$instagram_bundle" 2>&1)
+    "$arm64_bundle" "$arm32_bundle" 2>&1)
   status=$?
   set -e
   [[ $status -eq 2 ]] || fail "avd accept returned $status, expected 2"
