@@ -2,23 +2,23 @@
 # declaw-lab: one command to a rooted Android that decrypts an app's HTTPS into Burp.
 #
 # Backend is the optional first arg (default qemu):
-#   qemu  REAL aarch64 Android 16 (qemu TCG, rooted). The ONLY backend that runs
-#         declaw's arm64-only primitives (mempatch, HWBP). Slower.
+#   qemu  REAL aarch64 Android 16 (qemu TCG, rooted), a fetched ~1.1GB prebuilt. The
+#         ONLY backend that runs declaw's arm64 primitives (mempatch, HWBP). Slower.
 #   avd   x86_64 Android (Google emulator, KVM, rooted). Fast; OkHttp/NSC/Flutter.
 #
 # Usage: lab [qemu|avd] [command | app | package]     default: qemu, boot+root+UI+shell
 #   (nothing)   boot (if needed) + root + UI window + root shell
 #   APP | PKG   boot + install (APK/APKM/XAPK/split dir) + send HTTPS to Burp + UI
 #   install [--abi ABI] APP  boot, verify ARM32+ARM64 support, then install (qemu)
-#   check       inspect the already-running qemu guest's ARM32+ARM64 runtime (no boot)
+#   check       verify the running qemu guest: root, permissive, Android 16, arm64-v8a
 #   accept ARM64 ARM32  install + launch an arm64 app and an arm32 app in one qemu boot
 #   capture [X] same as passing X: X = local app bundle, package to scope, or nothing for
 #               all apps. Decrypts to Burp (127.0.0.1:8080) and capture/traffic.log.
 #   keylog PKG  QUIC/HTTP3 (cronet) is invisible to a MITM: run declaw's friTap key+pcap
 #               capture on this device (SSLKEYLOG + pcap, decrypt in Wireshark).
 #   probe P L O confirm L@O is the LIVE ssl_verify_peer_cert in pkg P (BRK; qemu/arm64 only).
-#   fetch [TAG] download + verify a published multilib image (no build), then provision it
-#   provision   one-time: prepare a rooted image from a fetched or locally-built artifact
+#   fetch       download + verify the pinned ~1.1GB arm64 prebuilt (no build)
+#   provision   one-time: root + permissive patch into a bootable rig (arm64 default)
 #   up root shell ui   the individual steps, all folded into the default
 #   status | down      show state | stop (also stops the MITM)
 #
