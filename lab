@@ -49,9 +49,16 @@ case "${1:-}" in
 esac
 
 # ---------------------------------------------------------------- qemu (arm64)
+# Default rig is the lightweight ~1.1GB arm64 prebuilt (lineage-arm64). Set
+# PROVISION_VARIANT=multilib to use the heavier locally-built 32-bit-capable rig.
+# QDIR is resolved once here and exported so provision/boot inherit the same dir.
 QPORT=6555
 QDEV="localhost:$QPORT"
-QDIR="${LINEAGE_DIR:-$HOME/Android/lineage-multilib}"
+case "${PROVISION_VARIANT:-arm64}" in
+  multilib) QDIR="${LINEAGE_DIR:-$HOME/Android/lineage-multilib}" ;;
+  *)        QDIR="${LINEAGE_DIR:-$HOME/Android/lineage-arm64}" ;;
+esac
+export LINEAGE_DIR="$QDIR"
 QRUN="$QDIR/run"
 qemu_up() {
   pgrep -f 'qemu-system-aarch64.*declaw-lineage' >/dev/null && { echo "[qemu] already up"; return; }
@@ -450,7 +457,10 @@ case "$BACKEND:$CMD" in
   qemu:install)   qemu_install "$@" ;;
   qemu:accept)    qemu_accept "$@" ;;
   qemu:probe)     do_probe "$QDEV" "$@" ;;
-  qemu:fetch)     "$HERE/qemu/fetch-multilib.sh" "$@" ;;
+  qemu:fetch)     case "${PROVISION_VARIANT:-arm64}" in
+                    multilib) "$HERE/qemu/fetch-multilib.sh" "$@" ;;
+                    *)        "$HERE/qemu/fetch-arm64.sh" "$@" ;;
+                  esac ;;
   qemu:provision) "$HERE/qemu/provision.sh" ;;
   qemu:up)        qemu_up ;;
   qemu:root)      "$HERE/qemu/adb-root.sh" ;;

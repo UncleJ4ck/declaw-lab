@@ -3,7 +3,7 @@
 # apps execute as ARM guest code; no x86 emulator, KVM, or native bridge is used.
 set -euo pipefail
 
-LINEAGE_DIR="${LINEAGE_DIR:-$HOME/Android/lineage-multilib}"
+LINEAGE_DIR="${LINEAGE_DIR:-$HOME/Android/lineage-arm64}"
 IMG_DIR="${IMG_DIR:-$LINEAGE_DIR/LineageOS_on_arm64.utm/Data}"
 RUN="${RUN:-$LINEAGE_DIR/run}"
 VDA="${VDA:-$LINEAGE_DIR/vda.raw}"

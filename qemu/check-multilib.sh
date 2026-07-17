@@ -7,6 +7,12 @@ if [[ -z $serial ]]; then
   exit 1
 fi
 
+# arm64 (default): the lightweight prebuilt runs arm64-v8a only (zygote64). multilib:
+# the locally-built rig also runs armeabi-v7a (zygote64_32). Only the multilib variant
+# asserts the 32-bit runtime, ABI list, and CONFIG_COMPAT.
+variant="${PROVISION_VARIANT:-arm64}"
+case "$variant" in arm64|multilib) ;; *) echo "[check] ERROR: unknown PROVISION_VARIANT: $variant" >&2; exit 1 ;; esac
+
 adb_timeout=${CHECK_ADB_TIMEOUT:-10}
 if [[ ! $adb_timeout =~ ^[0-9]+([.][0-9]+)?[smhd]?$ ]]; then
   echo "[check] ERROR: invalid CHECK_ADB_TIMEOUT=$adb_timeout" >&2
@@ -114,37 +120,42 @@ runtime_report() {
 runtime64_report=
 runtime32_report=
 runtime_report runtime64_report "${runtime64[@]}"
-runtime_report runtime32_report "${runtime32[@]}"
+[[ $variant == multilib ]] && runtime_report runtime32_report "${runtime32[@]}"
 
 [[ $release == 16 ]] || failures+=("Android release=${release:-<empty>} (need 16)")
 [[ $sdk == 36 ]] || failures+=("Android SDK=${sdk:-<empty>} (need 36)")
 [[ $kernel == aarch64 ]] || failures+=("kernel=${kernel:-<empty>} (need aarch64)")
 [[ $uid == 0 ]] || failures+=("uid=${uid:-<empty>} (need 0)")
 [[ $selinux == Permissive ]] || failures+=("SELinux=${selinux:-<empty>} (need Permissive)")
-[[ $zygote == zygote64_32 ]] || failures+=("ro.zygote=${zygote:-<empty>} (need zygote64_32)")
 has_abi "$abilist64" arm64-v8a || failures+=("abilist64=${abilist64:-<empty>} (need arm64-v8a)")
-if ! has_abi "$abilist32" armeabi-v7a || ! has_abi "$abilist32" armeabi; then
-  failures+=("abilist32=${abilist32:-<empty>} (need armeabi-v7a,armeabi)")
-fi
+
 compat_proof=
-if [[ $compat == "# CONFIG_COMPAT is not set" ]]; then
-  failures+=("CONFIG_COMPAT is disabled (need y)")
-elif [[ $compat == "<unreadable>" || -z $compat ]]; then
-  probe=
-  # This program is intentionally expanded by the Android guest's shell.
-  # shellcheck disable=SC2016
-  probe_command='/apex/com.android.runtime/bin/linker --help >/dev/null 2>&1; printf "status=%s\n" "$?"'
-  adb_capture probe "probing 32-bit runtime execution" shell "$probe_command"
-  if [[ $probe == status=0 ]]; then
-    compat_proof="runtime-probed:/apex/com.android.runtime/bin/linker --help"
-  elif [[ $probe == status=* ]]; then
-    failures+=("CONFIG_COMPAT unavailable and 32-bit runtime probe failed")
-  else
-    echo "[check] ERROR: unexpected response while probing 32-bit runtime execution"
-    exit 1
+if [[ $variant == multilib ]]; then
+  [[ $zygote == zygote64_32 ]] || failures+=("ro.zygote=${zygote:-<empty>} (need zygote64_32)")
+  if ! has_abi "$abilist32" armeabi-v7a || ! has_abi "$abilist32" armeabi; then
+    failures+=("abilist32=${abilist32:-<empty>} (need armeabi-v7a,armeabi)")
   fi
-elif [[ $compat != CONFIG_COMPAT=y ]]; then
-  failures+=("CONFIG_COMPAT=${compat#CONFIG_COMPAT=} (need y)")
+  if [[ $compat == "# CONFIG_COMPAT is not set" ]]; then
+    failures+=("CONFIG_COMPAT is disabled (need y)")
+  elif [[ $compat == "<unreadable>" || -z $compat ]]; then
+    probe=
+    # This program is intentionally expanded by the Android guest's shell.
+    # shellcheck disable=SC2016
+    probe_command='/apex/com.android.runtime/bin/linker --help >/dev/null 2>&1; printf "status=%s\n" "$?"'
+    adb_capture probe "probing 32-bit runtime execution" shell "$probe_command"
+    if [[ $probe == status=0 ]]; then
+      compat_proof="runtime-probed:/apex/com.android.runtime/bin/linker --help"
+    elif [[ $probe == status=* ]]; then
+      failures+=("CONFIG_COMPAT unavailable and 32-bit runtime probe failed")
+    else
+      echo "[check] ERROR: unexpected response while probing 32-bit runtime execution"
+      exit 1
+    fi
+  elif [[ $compat != CONFIG_COMPAT=y ]]; then
+    failures+=("CONFIG_COMPAT=${compat#CONFIG_COMPAT=} (need y)")
+  fi
+else
+  [[ $zygote == zygote64* ]] || failures+=("ro.zygote=${zygote:-<empty>} (need zygote64)")
 fi
 
 echo "[check] release=${release:-<empty>} sdk=${sdk:-<empty>} kernel=${kernel:-<empty>} uid=${uid:-<empty>} selinux=${selinux:-<empty>}"
@@ -162,8 +173,12 @@ if ((${#failures[@]})); then
   for failure in "${failures[@]}"; do
     echo "[check] FAIL: $failure"
   done
-  echo "[check] FAIL: guest does not satisfy the ARM32 + ARM64 Android 16 contract"
+  echo "[check] FAIL: guest does not satisfy the $variant Android 16 contract"
   exit 2
 fi
 
-echo "[check] PASS: one Android 16 guest runs arm64-v8a and armeabi-v7a apps"
+if [[ $variant == multilib ]]; then
+  echo "[check] PASS: one Android 16 guest runs arm64-v8a and armeabi-v7a apps"
+else
+  echo "[check] PASS: rooted permissive Android 16 arm64-v8a guest (declaw primitives ready)"
+fi

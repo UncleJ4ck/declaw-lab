@@ -1,15 +1,30 @@
 #!/usr/bin/env bash
-# Provision a fresh LineageOS Android 16 virtio_arm64 multilib artifact into a
-# rooted, permissive QEMU rig. The older lineage-arm64 rig is intentionally not
-# read or modified; this script publishes only to lineage-multilib by default.
+# Provision a fresh LineageOS Android 16 QEMU rig into a rooted, permissive image.
+# Two variants share one raw-disk byte-patch transform; only the source and its
+# provenance check differ:
+#
+#   arm64 (default): the ~1.1 GB jqssun virtio_arm64only prebuilt, published to
+#     lineage-arm64. No source build. This runs every declaw arm64 primitive
+#     (mempatch, HWBP). Provenance is a pinned upstream SHA256.
+#   multilib: a locally built virtio_arm64 image (arm64 + arm32, zygote64_32),
+#     published to lineage-multilib, for exercising 32-bit apps. Provenance is the
+#     builder metadata + SHA256SUMS contract.
+#
+# Select with PROVISION_VARIANT=arm64|multilib. The two rigs live in separate
+# directories and neither run reads or modifies the other.
 set -euo pipefail
 
-DIR="${LINEAGE_DIR:-$HOME/Android/lineage-multilib}"
-BUILD_ROOT="${BUILD_ROOT:-$HOME/Android/lineage-multilib-build}"
+VARIANT="${PROVISION_VARIANT:-arm64}"
 DRY_RUN="${PROVISION_DRY_RUN:-0}"
 UTM_ROOT=LineageOS_on_arm64.utm
-CONTRACT='android=16 sdk=36 abis=arm64-v8a,armeabi-v7a,armeabi zygote=zygote64_32'
 STAGE=""
+
+# Pinned provenance for the arm64 prebuilt, shared with fetch-arm64.sh so the two
+# never drift. Fail closed on any mismatch.
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=qemu/arm64-pin.env
+. "$HERE/arm64-pin.env"
+ARM64_ZIP_SHA256="$ARM64_PIN_SHA256"
 
 error() {
   echo "[provision] ERROR: $*" >&2
@@ -20,14 +35,33 @@ need() {
   command -v "$1" >/dev/null 2>&1 || error "missing dependency: $1"
 }
 
+case "$VARIANT" in
+  arm64)
+    DIR="${LINEAGE_DIR:-$HOME/Android/lineage-arm64}"
+    BUILD_ROOT="${BUILD_ROOT:-$HOME/Android/lineage-arm64-build}"
+    CONTRACT='android=16 abis=arm64-v8a zygote=zygote64 source=jqssun-virtio_arm64only-prebuilt'
+    ;;
+  multilib)
+    DIR="${LINEAGE_DIR:-$HOME/Android/lineage-multilib}"
+    BUILD_ROOT="${BUILD_ROOT:-$HOME/Android/lineage-multilib-build}"
+    CONTRACT='android=16 sdk=36 abis=arm64-v8a,armeabi-v7a,armeabi zygote=zygote64_32'
+    ;;
+  *)
+    error "unknown PROVISION_VARIANT: $VARIANT (arm64|multilib)"
+    ;;
+esac
+
 discover_archive() {
   local candidate newest=""
   local -a candidates=()
   shopt -s nullglob
-  candidates=("$BUILD_ROOT"/dist/*-virtio_arm64/UTM-VM-*-virtio_arm64.zip)
+  case "$VARIANT" in
+    arm64)    candidates=("$BUILD_ROOT"/dist/UTM-VM-*-virtio_arm64only.zip) ;;
+    multilib) candidates=("$BUILD_ROOT"/dist/*-virtio_arm64/UTM-VM-*-virtio_arm64.zip) ;;
+  esac
   shopt -u nullglob
   ((${#candidates[@]} > 0)) || \
-    error "no multilib artifact found under $BUILD_ROOT/dist/*-virtio_arm64"
+    error "no $VARIANT artifact found under $BUILD_ROOT/dist (run 'lab qemu fetch' first)"
   for candidate in "${candidates[@]}"; do
     [[ -z $newest || $candidate -nt $newest ]] && newest=$candidate
   done
@@ -36,11 +70,31 @@ discover_archive() {
 
 validate_archive_name() {
   local name=${1##*/}
-  case "$name" in
-    UTM-VM-*-virtio_arm64.zip) ;;
-    *) error "artifact must be an exact UTM-VM-*-virtio_arm64.zip multilib build: $name" ;;
+  case "$VARIANT" in
+    arm64)
+      case "$name" in
+        UTM-VM-*-virtio_arm64only.zip) ;;
+        *) error "arm64 variant needs a UTM-VM-*-virtio_arm64only.zip prebuilt: $name" ;;
+      esac
+      ;;
+    multilib)
+      case "$name" in
+        UTM-VM-*-virtio_arm64.zip) ;;
+        *) error "artifact must be an exact UTM-VM-*-virtio_arm64.zip multilib build: $name" ;;
+      esac
+      [[ $name != *arm64only* ]] || error "arm64only artifacts are forbidden: $name"
+      ;;
   esac
-  [[ $name != *arm64only* ]] || error "arm64only artifacts are forbidden: $name"
+}
+
+# arm64 provenance: the prebuilt is a third-party image, so bind it to a pinned
+# upstream SHA256 rather than a self-builder contract. Relaxing "is this my build"
+# is fine; the byte identity is still verified and fails closed.
+verify_arm64_pin() {
+  local archive=$1 got
+  got=$(sha256sum "$archive" | awk '{print $1}')
+  [[ $got == "$ARM64_ZIP_SHA256" ]] || \
+    error "arm64 prebuilt SHA256 mismatch (corrupt or wrong image): expected $ARM64_ZIP_SHA256, got $got"
 }
 
 validate_archive_layout() {
@@ -306,33 +360,45 @@ cleanup() {
   fi
 }
 
-SOURCE_ARCHIVE="${LINEAGE_MULTILIB_ZIP:-}"
+SOURCE_ARCHIVE="${LINEAGE_ZIP:-${LINEAGE_MULTILIB_ZIP:-}}"
 [[ -n $SOURCE_ARCHIVE ]] || SOURCE_ARCHIVE=$(discover_archive)
 [[ -f $SOURCE_ARCHIVE ]] || error "artifact not found: $SOURCE_ARCHIVE"
 SOURCE_ARCHIVE=$(cd "$(dirname "$SOURCE_ARCHIVE")" && pwd -P)/$(basename "$SOURCE_ARCHIVE")
 SOURCE_DIR=$(dirname "$SOURCE_ARCHIVE")
-SOURCE_METADATA="${LINEAGE_BUILD_METADATA:-$SOURCE_DIR/build-metadata.txt}"
-SOURCE_CHECKSUMS="${LINEAGE_SHA256SUMS:-$SOURCE_DIR/SHA256SUMS}"
-[[ -f $SOURCE_METADATA ]] || error "builder metadata not found: $SOURCE_METADATA"
-[[ -f $SOURCE_CHECKSUMS ]] || error "builder checksums not found: $SOURCE_CHECKSUMS"
-SOURCE_METADATA=$(cd "$(dirname "$SOURCE_METADATA")" && pwd -P)/$(basename "$SOURCE_METADATA")
-SOURCE_CHECKSUMS=$(cd "$(dirname "$SOURCE_CHECKSUMS")" && pwd -P)/$(basename "$SOURCE_CHECKSUMS")
 ARCHIVE_NAME=$(basename "$SOURCE_ARCHIVE")
+
+# The multilib builder ships a metadata + checksums sidecar that binds the image to
+# its build contract. The arm64 prebuilt has no such sidecar; it is pinned by SHA256.
+SOURCE_METADATA=""
+SOURCE_CHECKSUMS=""
+if [[ $VARIANT == multilib ]]; then
+  SOURCE_METADATA="${LINEAGE_BUILD_METADATA:-$SOURCE_DIR/build-metadata.txt}"
+  SOURCE_CHECKSUMS="${LINEAGE_SHA256SUMS:-$SOURCE_DIR/SHA256SUMS}"
+  [[ -f $SOURCE_METADATA ]] || error "builder metadata not found: $SOURCE_METADATA"
+  [[ -f $SOURCE_CHECKSUMS ]] || error "builder checksums not found: $SOURCE_CHECKSUMS"
+  SOURCE_METADATA=$(cd "$(dirname "$SOURCE_METADATA")" && pwd -P)/$(basename "$SOURCE_METADATA")
+  SOURCE_CHECKSUMS=$(cd "$(dirname "$SOURCE_CHECKSUMS")" && pwd -P)/$(basename "$SOURCE_CHECKSUMS")
+fi
 
 need python3
 need sha256sum
 
 if [[ $DRY_RUN == 1 ]]; then
   validate_archive_name "$SOURCE_ARCHIVE"
-  validate_builder_output "$SOURCE_ARCHIVE" "$SOURCE_METADATA" "$SOURCE_CHECKSUMS"
+  if [[ $VARIANT == multilib ]]; then
+    validate_builder_output "$SOURCE_ARCHIVE" "$SOURCE_METADATA" "$SOURCE_CHECKSUMS"
+  else
+    verify_arm64_pin "$SOURCE_ARCHIVE"
+  fi
   validate_archive_layout "$SOURCE_ARCHIVE"
   SOURCE_SHA=$(sha256sum "$SOURCE_ARCHIVE" | awk '{print $1}')
+  echo "[provision] variant=$VARIANT"
   echo "[provision] source=$SOURCE_ARCHIVE"
   echo "[provision] sha256=$SOURCE_SHA"
   echo "[provision] contract=$CONTRACT"
   echo "[provision] target=$DIR"
   echo "[provision] dry-run: stage ${DIR}.staging.XXXXXX"
-  echo "[provision] dry-run: copy ZIP + build-metadata.txt + SHA256SUMS once into protected staging"
+  echo "[provision] dry-run: copy inputs once into protected staging"
   echo "[provision] dry-run: extract $UTM_ROOT with validated safe paths"
   echo "[provision] dry-run: convert $UTM_ROOT/Data/vda.qcow2 -> vda.raw"
   echo "[provision] dry-run: patch staging vendor_boot and Android properties"
@@ -357,17 +423,27 @@ trap 'exit 143' TERM
 INPUT="$STAGE/.input"
 mkdir "$INPUT"
 cp -- "$SOURCE_ARCHIVE" "$INPUT/$ARCHIVE_NAME"
-cp -- "$SOURCE_METADATA" "$INPUT/build-metadata.txt"
-cp -- "$SOURCE_CHECKSUMS" "$INPUT/SHA256SUMS"
-chmod a-w "$INPUT/$ARCHIVE_NAME" "$INPUT/build-metadata.txt" "$INPUT/SHA256SUMS"
+chmod a-w "$INPUT/$ARCHIVE_NAME"
 ARCHIVE="$INPUT/$ARCHIVE_NAME"
-METADATA="$INPUT/build-metadata.txt"
-CHECKSUMS="$INPUT/SHA256SUMS"
+METADATA=""
+CHECKSUMS=""
+if [[ $VARIANT == multilib ]]; then
+  cp -- "$SOURCE_METADATA" "$INPUT/build-metadata.txt"
+  cp -- "$SOURCE_CHECKSUMS" "$INPUT/SHA256SUMS"
+  chmod a-w "$INPUT/build-metadata.txt" "$INPUT/SHA256SUMS"
+  METADATA="$INPUT/build-metadata.txt"
+  CHECKSUMS="$INPUT/SHA256SUMS"
+fi
 
 validate_archive_name "$ARCHIVE"
-validate_builder_output "$ARCHIVE" "$METADATA" "$CHECKSUMS"
+if [[ $VARIANT == multilib ]]; then
+  validate_builder_output "$ARCHIVE" "$METADATA" "$CHECKSUMS"
+else
+  verify_arm64_pin "$ARCHIVE"
+fi
 validate_archive_layout "$ARCHIVE"
 SOURCE_SHA=$(sha256sum "$ARCHIVE" | awk '{print $1}')
+echo "[provision] variant=$VARIANT"
 echo "[provision] source=$SOURCE_ARCHIVE"
 echo "[provision] sha256=$SOURCE_SHA"
 echo "[provision] contract=$CONTRACT"
@@ -381,8 +457,10 @@ for path in "$STAGE/$UTM_ROOT/config.plist" "$DATA/efi_vars.fd" \
   [[ -f $path ]] || error "extracted layout lost required file: $path"
 done
 
-mv -- "$METADATA" "$STAGE/build-metadata.txt"
-mv -- "$CHECKSUMS" "$STAGE/SHA256SUMS"
+if [[ $VARIANT == multilib ]]; then
+  mv -- "$METADATA" "$STAGE/build-metadata.txt"
+  mv -- "$CHECKSUMS" "$STAGE/SHA256SUMS"
+fi
 rm -f -- "$ARCHIVE"
 rmdir "$INPUT"
 
@@ -398,6 +476,7 @@ patch_system_properties "$STAGE/vda.raw"
 RAW_SHA=$(sha256sum "$STAGE/vda.raw" | awk '{print $1}')
 printf '%s  %s\n' "$SOURCE_SHA" "$ARCHIVE_NAME" >"$STAGE/artifact.sha256"
 cat >"$STAGE/provenance.txt" <<EOF
+variant=$VARIANT
 source=$SOURCE_ARCHIVE
 source_sha256=$SOURCE_SHA
 vda_raw_sha256=$RAW_SHA
@@ -408,5 +487,5 @@ EOF
 mv -T -- "$STAGE" "$DIR"
 STAGE=""
 trap - EXIT HUP INT TERM
-echo "[provision] PASS: published complete multilib rig at $DIR"
+echo "[provision] PASS: published complete $VARIANT rig at $DIR"
 echo "[provision] next: ./lab qemu up && ./lab qemu check"
