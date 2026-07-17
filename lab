@@ -60,8 +60,12 @@ case "${PROVISION_VARIANT:-arm64}" in
 esac
 export LINEAGE_DIR="$QDIR"
 QRUN="$QDIR/run"
+# Anchor on the exact `-name declaw-lineage-arm64` launch token, not a loose
+# `qemu-system-aarch64.*declaw-lineage` substring that any shell (a status grep,
+# this dispatcher) can carry in its own argv and trip a false "already up".
+qemu_alive() { pgrep -f 'qemu-system-aarch64 -name declaw-lineage-arm64' >/dev/null; }
 qemu_up() {
-  pgrep -f 'qemu-system-aarch64.*declaw-lineage' >/dev/null && { echo "[qemu] already up"; return; }
+  qemu_alive && { echo "[qemu] already up"; return; }
   [ -f "$QDIR/vda.raw" ] || { echo "[qemu] run 'lab qemu provision' first"; exit 1; }
   nohup "$HERE/qemu/boot-arm64.sh" >/tmp/declaw-qemu.log 2>&1 &
   echo "[qemu] booting (headless, ~4 min first time). tail /tmp/declaw-qemu.log"
@@ -70,12 +74,12 @@ qemu_down() {
   mitm_stop
   local mon="$QRUN/mon.sock"
   [ -S "$mon" ] && echo quit | socat - "UNIX-CONNECT:$mon" >/dev/null 2>&1 || true
-  sleep 2; pgrep -f 'qemu-system-aarch64.*declaw-lineage' >/dev/null && echo "[qemu] still up" || echo "[qemu] down (MITM stopped, guest redirect gone with the VM)"
+  sleep 2; qemu_alive && echo "[qemu] still up" || echo "[qemu] down (MITM stopped, guest redirect gone with the VM)"
 }
 qemu_status() {
   local host_process=not-found adb_timeout="${LAB_ADB_TIMEOUT:-5}" state
   local uid release kernel selinux zygote abilist64 abilist32
-  pgrep -f '[q]emu-system-aarch64.*declaw-lineage' >/dev/null && host_process=running || true
+  qemu_alive && host_process=running || true
   echo "[qemu] host-process=$host_process"
 
   timeout "$adb_timeout" adb connect "$QDEV" >/dev/null 2>&1 || true
@@ -104,7 +108,7 @@ qemu_ensure() {  # boot (if needed) + wait + root; returns with the device up an
   adb connect "$QDEV" >/dev/null 2>&1 || true
   for _ in $(seq 1 90); do
     [ "$(timeout 6 adb -s "$QDEV" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = 1 ] && break
-    pgrep -f 'qemu-system-aarch64.*declaw-lineage' >/dev/null || { echo "[qemu] boot failed, see /tmp/declaw-qemu.log"; exit 1; }
+    qemu_alive || { echo "[qemu] boot failed, see /tmp/declaw-qemu.log"; exit 1; }
     sleep 8; adb connect "$QDEV" >/dev/null 2>&1 || true
   done
   "$HERE/qemu/adb-root.sh" >/dev/null 2>&1 || echo "[qemu] warning: root not confirmed"
